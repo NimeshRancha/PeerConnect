@@ -4,36 +4,62 @@ import android.Manifest
 import android.content.Context
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.net.wifi.p2p.WifiP2pConfig
 import android.net.wifi.p2p.WifiP2pDevice
+import android.net.wifi.p2p.WifiP2pInfo
 import android.net.wifi.p2p.WifiP2pManager
+import android.os.Build
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresPermission
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.material3.Button
-import androidx.compose.material3.Text
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.peerconnect.util.ConnectionState
 import com.example.peerconnect.util.WifiDirectBroadcastReceiver
 
 @Composable
-fun PeerDiscoveryScreen() {
+fun PeerDiscoveryScreen(
+    onConnectionInfoChanged: (WifiP2pInfo) -> Unit = {}
+) {
     val context = LocalContext.current
-    val peers = remember { mutableStateListOf<WifiP2pDevice>() }
     val manager = remember { context.getSystemService(Context.WIFI_P2P_SERVICE) as WifiP2pManager }
     val channel = remember { manager.initialize(context, context.mainLooper, null) }
 
+    val viewModel = viewModel<PeerDiscoveryViewModel>(
+        factory = PeerDiscoveryViewModel.provideFactory(context, manager, channel)
+    )
+
     val peerListListener = WifiP2pManager.PeerListListener { peerList ->
-        peers.clear()
-        peers.addAll(peerList.deviceList)
+        viewModel.updatePeers(peerList.deviceList.toList())
+    }
+
+    val connectionInfoListener = WifiP2pManager.ConnectionInfoListener { info ->
+        if (info.groupFormed) {
+            onConnectionInfoChanged(info)
+        }
     }
 
     val receiver = remember {
-        WifiDirectBroadcastReceiver(manager, channel, peerListListener)
+        WifiDirectBroadcastReceiver(
+            manager,
+            channel,
+            peerListListener,
+            connectionInfoListener,
+            viewModel
+        )
     }
 
     val intentFilter = remember {
@@ -45,23 +71,28 @@ fun PeerDiscoveryScreen() {
         }
     }
 
-    DisposableEffect(Unit) {
-        context.registerReceiver(receiver, intentFilter)
-        onDispose {
-            context.unregisterReceiver(receiver)
+    val multiplePermissionsLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val allGranted = permissions.all { it.value }
+        if (allGranted) {
+            try {
+                discoverPeers(manager, channel, context)
+            } catch (e: SecurityException) {
+                Toast.makeText(
+                    context,
+                    "Missing required permissions for peer discovery",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        } else {
+            Toast.makeText(
+                context,
+                "All permissions are required for peer discovery and connection",
+                Toast.LENGTH_SHORT
+            ).show()
         }
     }
-
-    val permissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission(),
-        onResult = { isGranted ->
-            if (isGranted) {
-                discoverPeers(manager, channel, context)
-            } else {
-                Toast.makeText(context, "Location permission is required to discover peers.", Toast.LENGTH_SHORT).show()
-            }
-        }
-    )
 
     Column(
         modifier = Modifier
@@ -69,48 +100,233 @@ fun PeerDiscoveryScreen() {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Text("Nearby Devices:")
+        // Connection Status
+        ConnectionStatusCard(
+            connectionState = viewModel.connectionState,
+            connectionInfo = viewModel.connectionInfo
+        )
 
-        if (peers.isEmpty()) {
-            Text("No devices found.")
-        } else {
-            peers.forEach { device ->
-                Text("- ${device.deviceName} (${device.deviceAddress})")
-            }
+        // Discover Button
+        Button(
+            onClick = {
+                checkAndRequestPermissions(context, multiplePermissionsLauncher, manager, channel)
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Discover Peers")
         }
 
-        Button(onClick = {
-            val permissionCheck = ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.ACCESS_FINE_LOCATION
+        // Peer List
+        Text(
+            "Available Devices:",
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(vertical = 8.dp)
+        )
+
+        if (viewModel.peers.isEmpty()) {
+            Text(
+                "No devices found",
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 16.dp),
+                textAlign = TextAlign.Center,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            if (permissionCheck == PackageManager.PERMISSION_GRANTED) {
-                discoverPeers(manager, channel, context)
-            } else {
-                permissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+        } else {
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                items(viewModel.peers) { device ->
+                    PeerDeviceCard(
+                        device = device,
+                        onConnect = {
+                            viewModel.connectToPeer(device)
+                        }
+                    )
+                }
             }
-        }) {
-            Text("Discover Peers")
+        }
+    }
+
+    // Cleanup on dispose
+    DisposableEffect(Unit) {
+        context.registerReceiver(receiver, intentFilter)
+        onDispose {
+            context.unregisterReceiver(receiver)
+            viewModel.disconnect()
         }
     }
 }
 
-@RequiresPermission(allOf = [Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.NEARBY_WIFI_DEVICES])
+@Composable
+fun ConnectionStatusCard(
+    connectionState: ConnectionState,
+    connectionInfo: WifiP2pInfo?
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(16.dp)
+                .fillMaxWidth()
+        ) {
+            Text(
+                "Connection Status",
+                style = MaterialTheme.typography.titleMedium
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            
+            val status = when {
+                connectionState.errorMessage != null -> connectionState.errorMessage
+                connectionState.isConnecting -> "Connecting..."
+                connectionState.isConnected -> "Connected"
+                connectionState.connectionFailed -> "Connection failed"
+                else -> "Not connected"
+            }
+            
+            Text(status)
+            
+            if (connectionInfo != null && connectionState.isConnected) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("Role: ${if (connectionInfo.isGroupOwner) "Group Owner" else "Client"}")
+                Text("Group Owner Address: ${connectionInfo.groupOwnerAddress?.hostAddress}")
+            }
+        }
+    }
+}
+
+@Composable
+fun PeerDeviceCard(
+    device: WifiP2pDevice,
+    onConnect: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onConnect)
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(16.dp)
+                .fillMaxWidth()
+        ) {
+            Text(
+                device.deviceName.ifEmpty { "Unknown Device" },
+                style = MaterialTheme.typography.titleMedium
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                device.deviceAddress,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                getDeviceStatus(device.status),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+private fun getDeviceStatus(deviceStatus: Int): String {
+    return when (deviceStatus) {
+        WifiP2pDevice.AVAILABLE -> "Available"
+        WifiP2pDevice.INVITED -> "Invited"
+        WifiP2pDevice.CONNECTED -> "Connected"
+        WifiP2pDevice.FAILED -> "Failed"
+        WifiP2pDevice.UNAVAILABLE -> "Unavailable"
+        else -> "Unknown"
+    }
+}
+
+@RequiresPermission(allOf = [
+    Manifest.permission.ACCESS_FINE_LOCATION,
+    Manifest.permission.ACCESS_WIFI_STATE,
+    Manifest.permission.CHANGE_WIFI_STATE,
+    Manifest.permission.NEARBY_WIFI_DEVICES
+])
 private fun discoverPeers(
     manager: WifiP2pManager,
     channel: WifiP2pManager.Channel,
     context: Context
 ) {
+    if (!hasRequiredPermissions(context)) {
+        throw SecurityException("Missing required permissions")
+    }
+
     manager.discoverPeers(channel, object : WifiP2pManager.ActionListener {
         override fun onSuccess() {
-            Toast.makeText(context, "Discovery Started", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "Discovery started", Toast.LENGTH_SHORT).show()
         }
 
         override fun onFailure(reason: Int) {
-            Toast.makeText(context, "Discovery Failed: $reason", Toast.LENGTH_SHORT).show()
+            val message = when (reason) {
+                WifiP2pManager.P2P_UNSUPPORTED -> "Wi-Fi Direct is not supported on this device"
+                WifiP2pManager.ERROR -> "Discovery failed due to an error"
+                WifiP2pManager.BUSY -> "Discovery failed because the system is busy"
+                else -> "Discovery failed"
+            }
+            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
         }
     })
 }
 
+private fun checkAndRequestPermissions(
+    context: Context,
+    permissionLauncher: ActivityResultLauncher<Array<String>>,
+    manager: WifiP2pManager,
+    channel: WifiP2pManager.Channel
+) {
+    val requiredPermissions = mutableListOf(
+        Manifest.permission.ACCESS_FINE_LOCATION,
+        Manifest.permission.ACCESS_COARSE_LOCATION,
+        Manifest.permission.ACCESS_WIFI_STATE,
+        Manifest.permission.CHANGE_WIFI_STATE
+    )
 
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        requiredPermissions.add(Manifest.permission.NEARBY_WIFI_DEVICES)
+    }
 
+    val missingPermissions = requiredPermissions.filter {
+        ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
+    }.toTypedArray()
+
+    if (missingPermissions.isEmpty()) {
+        try {
+            discoverPeers(manager, channel, context)
+        } catch (e: SecurityException) {
+            Toast.makeText(
+                context,
+                "Missing required permissions for peer discovery",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    } else {
+        permissionLauncher.launch(missingPermissions)
+    }
+}
+
+private fun hasRequiredPermissions(context: Context): Boolean {
+    val requiredPermissions = mutableListOf(
+        Manifest.permission.ACCESS_FINE_LOCATION,
+        Manifest.permission.ACCESS_COARSE_LOCATION,
+        Manifest.permission.ACCESS_WIFI_STATE,
+        Manifest.permission.CHANGE_WIFI_STATE
+    )
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        requiredPermissions.add(Manifest.permission.NEARBY_WIFI_DEVICES)
+    }
+
+    return requiredPermissions.all {
+        ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
+    }
+}

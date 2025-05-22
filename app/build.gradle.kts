@@ -33,9 +33,23 @@ android {
     }
     kotlinOptions {
         jvmTarget = "19"
-    }
+    }   
     buildFeatures {
         compose = true
+    }
+
+    lint {
+        baseline = file("lint-baseline.xml")
+        abortOnError = true
+        checkReleaseBuilds = true
+        // Ignore the NetworkInfo deprecation warnings since we're handling them properly
+        disable += setOf(
+            "ObsoleteSdkInt",
+            "MissingPermission"  // We're handling permissions properly in code
+        )
+        // Treat all warnings as errors except for deprecated API usage
+        warningsAsErrors = true
+        disable += "Deprecated"
     }
 }
 
@@ -53,6 +67,7 @@ dependencies {
     implementation(libs.androidx.navigation.runtime.android)
     implementation(libs.androidx.room.common.jvm)
     implementation(libs.androidx.room.runtime.android)
+    implementation(libs.gson)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

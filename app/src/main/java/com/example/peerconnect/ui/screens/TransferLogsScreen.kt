@@ -16,6 +16,7 @@ import com.example.peerconnect.repository.TransferLogRepository
 import kotlinx.coroutines.flow.collectLatest
 import java.text.SimpleDateFormat
 import java.util.*
+import androidx.compose.material3.HorizontalDivider
 
 @Composable
 fun TransferLogsScreen(context: Context = LocalContext.current) {
@@ -35,7 +36,7 @@ fun TransferLogsScreen(context: Context = LocalContext.current) {
         LazyColumn {
             items(logs) { log ->
                 TransferLogItem(log)
-                Divider()
+                HorizontalDivider()
             }
         }
     }

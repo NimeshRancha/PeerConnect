@@ -1,6 +1,7 @@
 package com.example.peerconnect.ui.navigation
 
-import androidx.compose.runtime.Composable
+import android.net.wifi.p2p.WifiP2pInfo
+import androidx.compose.runtime.*
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -9,6 +10,8 @@ import com.example.peerconnect.ui.screens.*
 
 @Composable
 fun PeerConnectNavGraph(navController: NavHostController = rememberNavController()) {
+    var connectionInfo by remember { mutableStateOf<WifiP2pInfo?>(null) }
+
     NavHost(navController = navController, startDestination = "home") {
         composable("home") {
             HomeScreen(navController = navController)
@@ -17,10 +20,15 @@ fun PeerConnectNavGraph(navController: NavHostController = rememberNavController
             DetailsScreen()
         }
         composable("folderSync") {
-            FolderSyncScreen()
+            FolderSyncScreen(connectionInfo = connectionInfo)
         }
         composable("peerDiscovery") {
-            PeerDiscoveryScreen()
+            PeerDiscoveryScreen(
+                onConnectionInfoChanged = { info ->
+                    connectionInfo = info
+                    navController.navigate("folderSync")
+                }
+            )
         }
         composable("settings") {
             SettingsScreen()
