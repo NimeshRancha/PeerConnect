@@ -6,9 +6,11 @@ import android.net.Uri
 import android.net.wifi.p2p.WifiP2pInfo
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -26,6 +28,8 @@ fun FolderSyncScreen(
     )
 ) {
     val context = LocalContext.current
+    val snackbarHostState = remember { SnackbarHostState() }
+    var wasConnected by remember { mutableStateOf(false) }
 
     // Effect to handle connection info changes
     LaunchedEffect(connectionInfo) {
@@ -34,6 +38,18 @@ fun FolderSyncScreen(
                 viewModel.setRemotePeer(info.groupOwnerAddress.hostAddress ?: return@let)
             }
         }
+    }
+
+    // Effect to show disconnection message
+    LaunchedEffect(viewModel.isConnected) {
+        if (wasConnected && !viewModel.isConnected) {
+            snackbarHostState.showSnackbar(
+                message = "Disconnected from peer",
+                duration = SnackbarDuration.Long,
+                withDismissAction = true
+            )
+        }
+        wasConnected = viewModel.isConnected
     }
 
     // Folder picker launcher
@@ -66,111 +82,158 @@ fun FolderSyncScreen(
         }
     )
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
-        // Local folder section
-        Card(
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp)
-            ) {
-                Text(
-                    "Local Folder",
-                    style = MaterialTheme.typography.titleMedium
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Button(
-                        onClick = { folderPickerLauncher.launch(null) },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("Select Folder to Sync")
-                    }
-                    if (viewModel.localFolderUri != null) {
-                        Button(
-                            onClick = { filePickerLauncher.launch(arrayOf("*/*")) },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("Upload File")
-                        }
-                    }
-                }
-                viewModel.localFolderUri?.let { uri ->
-                    Text(
-                        text = "Selected: ${uri.lastPathSegment}",
-                        style = MaterialTheme.typography.bodyMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(top = 8.dp)
-                    )
-                }
-            }
-        }
-
-        // Remote files section
-        Card(
+    Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) }
+    ) { paddingValues ->
+        Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
+                .fillMaxSize()
+                .padding(paddingValues)
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(16.dp)
+            // Connection Status Card
+            Card(
+                modifier = Modifier.fillMaxWidth()
             ) {
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        "Remote Files",
+                        text = "Connection Status",
                         style = MaterialTheme.typography.titleMedium
                     )
-                    IconButton(onClick = { viewModel.refreshRemoteFiles() }) {
-                        Text("🔄")
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .background(
+                                    color = if (viewModel.isConnected) 
+                                        MaterialTheme.colorScheme.primary 
+                                    else 
+                                        MaterialTheme.colorScheme.error,
+                                    shape = CircleShape
+                                )
+                        )
+                        Text(
+                            text = if (viewModel.isConnected) "Connected" else "Disconnected",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (viewModel.isConnected)
+                                MaterialTheme.colorScheme.primary
+                            else
+                                MaterialTheme.colorScheme.error
+                        )
                     }
                 }
+            }
 
-                if (viewModel.isLoading) {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
+            // Local folder section
+            Card(
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp)
+                ) {
+                    Text(
+                        "Local Folder",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        CircularProgressIndicator()
+                        Button(
+                            onClick = { folderPickerLauncher.launch(null) },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Select Folder to Sync")
+                        }
+                        if (viewModel.localFolderUri != null) {
+                            Button(
+                                onClick = { filePickerLauncher.launch(arrayOf("*/*")) },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("Upload File")
+                            }
+                        }
                     }
-                } else if (viewModel.errorMessage != null) {
-                    Text(
-                        text = viewModel.errorMessage ?: "",
-                        color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.padding(vertical = 8.dp)
-                    )
-                } else if (viewModel.remoteFiles.isEmpty()) {
-                    Text(
-                        text = "No remote files available",
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.padding(vertical = 8.dp)
-                    )
-                } else {
-                    LazyColumn(
-                        modifier = Modifier.fillMaxSize(),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    viewModel.localFolderUri?.let { uri ->
+                        Text(
+                            text = "Selected: ${uri.lastPathSegment}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(top = 8.dp)
+                        )
+                    }
+                }
+            }
+
+            // Remote files section
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(16.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        items(viewModel.remoteFiles) { fileName ->
-                            RemoteFileItem(
-                                fileName = fileName,
-                                onDownload = { viewModel.downloadFile(fileName) }
-                            )
+                        Text(
+                            "Remote Files",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        IconButton(onClick = { viewModel.refreshRemoteFiles() }) {
+                            Text("🔄")
+                        }
+                    }
+
+                    if (viewModel.isLoading) {
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator()
+                        }
+                    } else if (viewModel.errorMessage != null) {
+                        Text(
+                            text = viewModel.errorMessage ?: "",
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(vertical = 8.dp)
+                        )
+                    } else if (viewModel.remoteFiles.isEmpty()) {
+                        Text(
+                            text = "No remote files available",
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.padding(vertical = 8.dp)
+                        )
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            items(viewModel.remoteFiles) { fileName ->
+                                RemoteFileItem(
+                                    fileName = fileName,
+                                    onDownload = { viewModel.downloadFile(fileName) }
+                                )
+                            }
                         }
                     }
                 }

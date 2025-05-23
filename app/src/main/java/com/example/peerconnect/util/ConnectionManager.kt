@@ -36,6 +36,8 @@ class ConnectionManager(
 
     private var connectedDevice: WifiP2pDevice? = null
     private val handler = Handler(Looper.getMainLooper())
+    private var connectionTimeoutRunnable: Runnable? = null
+    
     private val keepAliveRunnable = object : Runnable {
         override fun run() {
             if (_connectionState.value.isConnected) {
@@ -51,6 +53,7 @@ class ConnectionManager(
         connectionFailed: Boolean = false,
         errorMessage: String? = null
     ) {
+        Log.d(TAG, "Updating connection state: connecting=$isConnecting, connected=$isConnected, failed=$connectionFailed, error=$errorMessage")
         _connectionState.value = ConnectionState(
             isConnecting = isConnecting,
             isConnected = isConnected,
@@ -59,16 +62,46 @@ class ConnectionManager(
         )
 
         if (isConnected) {
+            cancelConnectionTimeout()
             startKeepAlive()
-        } else {
+        } else if (!isConnecting) {
             stopKeepAlive()
         }
     }
 
     fun updateConnectionInfo(info: WifiP2pInfo?) {
+        Log.d(TAG, "Updating connection info: ${info?.toString()}")
         _connectionInfo.value = info
         if (info?.groupFormed == true) {
+            Log.d(TAG, "Group formed, updating connection state. Is group owner: ${info.isGroupOwner}")
             updateConnectionState(isConnected = true)
+            startKeepAlive()
+        } else {
+            Log.d(TAG, "Group not formed or disbanded")
+            handleDisconnection("Group not formed")
+        }
+    }
+
+    private fun startConnectionTimeout() {
+        cancelConnectionTimeout()
+        connectionTimeoutRunnable = Runnable {
+            Log.e(TAG, "Connection attempt timed out")
+            if (_connectionState.value.isConnecting) {
+                updateConnectionState(
+                    isConnecting = false,
+                    connectionFailed = true,
+                    errorMessage = "Connection attempt timed out"
+                )
+                disconnect()
+            }
+        }
+        handler.postDelayed(connectionTimeoutRunnable!!, CONNECTION_TIMEOUT)
+    }
+
+    private fun cancelConnectionTimeout() {
+        connectionTimeoutRunnable?.let {
+            handler.removeCallbacks(it)
+            connectionTimeoutRunnable = null
         }
     }
 
@@ -81,38 +114,47 @@ class ConnectionManager(
             return
         }
 
-        val config = WifiP2pConfig().apply {
-            deviceAddress = device.deviceAddress
-        }
-
-        updateConnectionState(isConnecting = true)
-        connectedDevice = device
-
         try {
+            // Cancel any existing connection attempt
+            cancelConnectionTimeout()
+            
+            // Reset connection state
+            updateConnectionState(isConnecting = true)
+            
+            val config = WifiP2pConfig().apply {
+                deviceAddress = device.deviceAddress
+                // Set connection timeout and group owner preferences
+                groupOwnerIntent = 0 // Let the system decide who becomes group owner
+            }
+
+            Log.d(TAG, "Initiating connection to device: ${device.deviceAddress}")
+            connectedDevice = device
+            startConnectionTimeout()
+
             manager.connect(channel, config, object : WifiP2pManager.ActionListener {
                 override fun onSuccess() {
-                    Log.d(TAG, "Connection initiated successfully")
+                    Log.d(TAG, "Connection initiated successfully to ${device.deviceAddress}")
+                    // Keep isConnecting true until we receive WIFI_P2P_CONNECTION_CHANGED_ACTION
                 }
 
                 override fun onFailure(reason: Int) {
+                    cancelConnectionTimeout()
                     val message = when (reason) {
                         WifiP2pManager.P2P_UNSUPPORTED -> "Wi-Fi Direct is not supported on this device"
-                        WifiP2pManager.ERROR -> "Connection failed due to an error"
-                        WifiP2pManager.BUSY -> "System is busy"
-                        else -> "Connection failed"
+                        WifiP2pManager.ERROR -> "Connection failed due to an internal error"
+                        WifiP2pManager.BUSY -> "System is busy, please try again"
+                        else -> "Connection failed (error code: $reason)"
                     }
-                    updateConnectionState(
-                        isConnecting = false,
-                        connectionFailed = true,
-                        errorMessage = message
-                    )
+                    Log.e(TAG, "Connection failed: $message")
+                    handleDisconnection(message)
                 }
             })
         } catch (e: SecurityException) {
-            updateConnectionState(
-                connectionFailed = true,
-                errorMessage = "Missing required permissions"
-            )
+            Log.e(TAG, "Security exception during connect: ${e.message}")
+            handleDisconnection("Missing required permissions")
+        } catch (e: Exception) {
+            Log.e(TAG, "Unexpected error during connect: ${e.message}")
+            handleDisconnection("Unexpected error: ${e.message}")
         }
     }
 
@@ -120,38 +162,51 @@ class ConnectionManager(
         if (!hasRequiredPermissions()) return
 
         try {
+            Log.d(TAG, "Checking connection status")
             manager.requestGroupInfo(channel) { group ->
                 if (group == null) {
-                    handleDisconnection()
+                    Log.d(TAG, "No group info available")
+                    handleDisconnection("No group info available")
                     return@requestGroupInfo
                 }
 
-                // If we're connected but the connected device is not in the group
                 val deviceInGroup = connectedDevice?.let { device ->
-                    group.clientList.any { it.deviceAddress == device.deviceAddress } ||
+                    val isInGroup = group.clientList.any { it.deviceAddress == device.deviceAddress } ||
                             group.owner.deviceAddress == device.deviceAddress
+                    Log.d(TAG, "Device ${device.deviceAddress} in group: $isInGroup (owner: ${group.owner.deviceAddress}, clients: ${group.clientList.joinToString { it.deviceAddress }})")
+                    isInGroup
                 } ?: false
 
                 if (!deviceInGroup) {
-                    handleDisconnection()
+                    Log.d(TAG, "Connected device not in group")
+                    handleDisconnection("Device not in group")
+                } else {
+                    Log.d(TAG, "Device still in group, connection maintained")
+                    // Double check with connection info
+                    manager.requestConnectionInfo(channel) { info ->
+                        if (info != null && info.groupFormed) {
+                            updateConnectionState(isConnected = true)
+                        } else {
+                            handleDisconnection("Group formed but no connection info")
+                        }
+                    }
                 }
             }
         } catch (e: SecurityException) {
             Log.e(TAG, "Security exception during connection check: ${e.message}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during connection check: ${e.message}")
         }
     }
 
-    private fun handleDisconnection() {
+    private fun handleDisconnection(reason: String) {
+        Log.d(TAG, "Handling disconnection: $reason")
         updateConnectionState(
             isConnected = false,
-            errorMessage = "Connection lost"
+            errorMessage = reason
         )
-        
-        // Attempt to reconnect if we have a stored device
-        connectedDevice?.let { device ->
-            Log.d(TAG, "Attempting to reconnect to ${device.deviceAddress}")
-            connectToPeer(device)
-        }
+        connectedDevice = null
+        _connectionInfo.value = null
     }
 
     private fun startKeepAlive() {
@@ -167,19 +222,43 @@ class ConnectionManager(
         if (!hasRequiredPermissions()) return
 
         try {
-            manager.removeGroup(channel, object : WifiP2pManager.ActionListener {
-                override fun onSuccess() {
-                    updateConnectionState()
-                    connectedDevice = null
-                    _connectionInfo.value = null
-                }
+            Log.d(TAG, "Initiating disconnect")
+            cancelConnectionTimeout()
+            stopKeepAlive()
+            
+            // Only try to remove group if we're connected or connecting
+            if (_connectionState.value.isConnected || _connectionState.value.isConnecting) {
+                manager.removeGroup(channel, object : WifiP2pManager.ActionListener {
+                    override fun onSuccess() {
+                        Log.d(TAG, "Successfully removed from group")
+                        updateConnectionState()
+                        connectedDevice = null
+                        _connectionInfo.value = null
+                    }
 
-                override fun onFailure(reason: Int) {
-                    Log.e(TAG, "Failed to remove group: $reason")
-                }
-            })
+                    override fun onFailure(reason: Int) {
+                        val message = when (reason) {
+                            WifiP2pManager.BUSY -> "System is busy"
+                            WifiP2pManager.ERROR -> "Internal error"
+                            else -> "Error code: $reason"
+                        }
+                        Log.e(TAG, "Failed to remove group: $message")
+                        // Still reset the state even if removeGroup fails
+                        updateConnectionState()
+                        connectedDevice = null
+                        _connectionInfo.value = null
+                    }
+                })
+            } else {
+                // Just reset state if we're not connected
+                updateConnectionState()
+                connectedDevice = null
+                _connectionInfo.value = null
+            }
         } catch (e: SecurityException) {
             Log.e(TAG, "Security exception during disconnect: ${e.message}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during disconnect: ${e.message}")
         }
     }
 
@@ -202,6 +281,7 @@ class ConnectionManager(
 
     companion object {
         private const val TAG = "ConnectionManager"
-        private const val KEEP_ALIVE_INTERVAL = 5000L // 5 seconds
+        private const val KEEP_ALIVE_INTERVAL = 2000L // Check every 2 seconds
+        private const val CONNECTION_TIMEOUT = 15000L // 15 seconds timeout for connection attempts
     }
 } 

@@ -4,6 +4,8 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.net.wifi.p2p.WifiP2pManager
+import android.os.Build
+import android.util.Log
 import com.example.peerconnect.ui.screens.PeerDiscoveryViewModel
 
 class WifiDirectBroadcastReceiver(
@@ -20,26 +22,63 @@ class WifiDirectBroadcastReceiver(
                 WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION -> {
                     val state = intent.getIntExtra(WifiP2pManager.EXTRA_WIFI_STATE, -1)
                     if (state == WifiP2pManager.WIFI_P2P_STATE_ENABLED) {
-                        // Wi-Fi P2P is enabled
+                        Log.d(TAG, "Wi-Fi P2P is enabled")
+                        // Request peers when P2P is enabled
+                        manager.requestPeers(channel, peerListener)
                     } else {
+                        Log.d(TAG, "Wi-Fi P2P is disabled")
                         viewModel.disconnect()
                     }
                 }
                 
                 WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION -> {
+                    Log.d(TAG, "P2P peers changed")
                     manager.requestPeers(channel, peerListener)
                 }
 
                 WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION -> {
-                    manager.requestConnectionInfo(channel, connectionInfoListener)
+                    Log.d(TAG, "P2P connection changed")
+                    // Request both group info and connection info to ensure proper state
+                    manager.requestGroupInfo(channel) { group ->
+                        Log.d(TAG, "Group info received: ${group != null}")
+                        if (group != null) {
+                            Log.d(TAG, "Group formed. Owner: ${group.owner.deviceAddress}, Clients: ${group.clientList.joinToString { it.deviceAddress }}")
+                            manager.requestConnectionInfo(channel) { info ->
+                                if (info != null && info.groupFormed) {
+                                    Log.d(TAG, "Connected to P2P network. Group owner: ${info.isGroupOwner}, Address: ${info.groupOwnerAddress?.hostAddress}")
+                                    connectionInfoListener.onConnectionInfoAvailable(info)
+                                } else {
+                                    Log.d(TAG, "Connection info not available or group not formed")
+                                }
+                            }
+                        } else {
+                            // Only disconnect if we were previously connected
+                            if (viewModel.connectionState.isConnected) {
+                                Log.d(TAG, "Group disbanded, disconnecting")
+                                viewModel.disconnect()
+                            } else {
+                                Log.d(TAG, "No group formed yet")
+                            }
+                        }
+                    }
                 }
 
                 WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION -> {
-                    // Handle device changes if needed
+                    Log.d(TAG, "This device changed")
+                    // Only check connection if we're already connected
+                    if (viewModel.connectionState.isConnected) {
+                        manager.requestConnectionInfo(channel, connectionInfoListener)
+                    }
                 }
             }
         } catch (e: SecurityException) {
-            // Handle security exception
+            Log.e(TAG, "Security exception in broadcast receiver: ${e.message}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in broadcast receiver: ${e.message}")
         }
+    }
+
+    companion object {
+        private const val TAG = "WifiDirectReceiver"
     }
 }

@@ -52,7 +52,7 @@ class PeerDiscoveryViewModel(
     }
 
     fun disconnect() {
-        connectionManager.disconnect()
+//        connectionManager.disconnect()
     }
 
     override fun onCleared() {
