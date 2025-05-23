@@ -282,6 +282,6 @@ class ConnectionManager(
     companion object {
         private const val TAG = "ConnectionManager"
         private const val KEEP_ALIVE_INTERVAL = 2000L // Check every 2 seconds
-        private const val CONNECTION_TIMEOUT = 15000L // 15 seconds timeout for connection attempts
+        private const val CONNECTION_TIMEOUT = 5000L // 15 seconds timeout for connection attempts
     }
 } 

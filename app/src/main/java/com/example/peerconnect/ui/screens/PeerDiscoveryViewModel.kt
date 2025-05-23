@@ -31,6 +31,8 @@ class PeerDiscoveryViewModel(
     var connectionInfo by mutableStateOf<WifiP2pInfo?>(null)
         private set
 
+    private var navigatingToFolderSync = false
+
     init {
         // Observe connection state changes
         connectionManager.connectionState
@@ -43,21 +45,34 @@ class PeerDiscoveryViewModel(
             .launchIn(viewModelScope)
     }
 
+    fun setNavigatingToFolderSync(navigating: Boolean) {
+        navigatingToFolderSync = navigating
+    }
+
+    fun isNavigatingToFolderSync(): Boolean = navigatingToFolderSync
+
     fun updatePeers(devices: List<WifiP2pDevice>) {
         peers = devices
     }
 
     fun connectToPeer(device: WifiP2pDevice) {
+        // Reset navigation state when starting a new connection
+        navigatingToFolderSync = false
         connectionManager.connectToPeer(device)
     }
 
     fun disconnect() {
-//        connectionManager.disconnect()
+        // Reset navigation state when disconnecting
+        navigatingToFolderSync = false
+        connectionManager.disconnect()
     }
 
     override fun onCleared() {
         super.onCleared()
-        connectionManager.disconnect()
+        // Only disconnect if we're not navigating to FolderSync
+        if (!navigatingToFolderSync) {
+            connectionManager.disconnect()
+        }
     }
 
     companion object {

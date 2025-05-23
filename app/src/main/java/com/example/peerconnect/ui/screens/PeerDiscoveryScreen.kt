@@ -48,6 +48,7 @@ fun PeerDiscoveryScreen(
 
     val connectionInfoListener = WifiP2pManager.ConnectionInfoListener { info ->
         if (info.groupFormed) {
+            viewModel.setNavigatingToFolderSync(true)
             onConnectionInfoChanged(info)
         }
     }
@@ -150,12 +151,14 @@ fun PeerDiscoveryScreen(
         }
     }
 
-    // Cleanup on dispose
+    // Modified DisposableEffect
     DisposableEffect(Unit) {
         context.registerReceiver(receiver, intentFilter)
         onDispose {
             context.unregisterReceiver(receiver)
-            viewModel.disconnect()
+            if (!viewModel.isNavigatingToFolderSync()) {
+                viewModel.disconnect()
+            }
         }
     }
 }
