@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.wifi.p2p.WifiP2pDevice
 import android.net.wifi.p2p.WifiP2pInfo
 import android.net.wifi.p2p.WifiP2pManager
+import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -12,6 +13,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.peerconnect.util.ConnectionManager
 import com.example.peerconnect.util.ConnectionState
+import com.example.peerconnect.util.DeviceStatusUtils
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 
@@ -20,7 +22,7 @@ class PeerDiscoveryViewModel(
     private val manager: WifiP2pManager,
     private val channel: WifiP2pManager.Channel
 ) : ViewModel() {
-    private val connectionManager = ConnectionManager(context, manager, channel)
+    val connectionManager = ConnectionManager(context, manager, channel)
 
     var peers by mutableStateOf<List<WifiP2pDevice>>(emptyList())
         private set
@@ -44,6 +46,13 @@ class PeerDiscoveryViewModel(
     }
 
     fun updatePeers(devices: List<WifiP2pDevice>) {
+        // Log status changes for each device
+        devices.forEach { device ->
+            val existingDevice = peers.find { it.deviceAddress == device.deviceAddress }
+            if (existingDevice?.status != device.status) {
+                Log.d("PeerDiscoveryViewModel", "Device ${device.deviceName} (${device.deviceAddress}) status changed from ${DeviceStatusUtils.getDeviceStatus(existingDevice?.status)} to ${DeviceStatusUtils.getDeviceStatus(device.status)}")
+            }
+        }
         peers = devices
     }
 
@@ -52,7 +61,7 @@ class PeerDiscoveryViewModel(
     }
 
     fun disconnect() {
-//        connectionManager.disconnect()
+        connectionManager.disconnect()
     }
 
     override fun onCleared() {

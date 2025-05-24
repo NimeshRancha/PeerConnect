@@ -30,18 +30,18 @@ class FileTransferClient(
     private suspend fun createSocket(): Socket = withContext(Dispatchers.IO) {
         closeCurrentSocket()
         var lastException: Exception? = null
-        
+
         for (attempt in 1..maxRetries) {
             try {
                 Log.d(TAG, "Attempting to connect to $targetIp:$targetPort (attempt $attempt/$maxRetries)")
-                
+
                 // Create new socket for each attempt
                 val socket = Socket()
                 socket.keepAlive = true
                 socket.tcpNoDelay = true
                 socket.soTimeout = connectionTimeoutMs
                 socket.reuseAddress = true
-                
+
                 // Set socket options before connect
                 socket.setPerformancePreferences(0, 1, 2) // Prioritize bandwidth and latency over connection time
                 socket.receiveBufferSize = 65536 // 64KB receive buffer
@@ -61,26 +61,26 @@ class FileTransferClient(
                 } else {
                     Log.w(TAG, "No suitable local address found, attempting connection without explicit bind")
                 }
-                
+
                 // Connect with timeout
                 socket.connect(java.net.InetSocketAddress(targetIp, targetPort), connectionTimeoutMs)
-                
+
                 // Verify connection
                 if (!socket.isConnected || socket.isClosed) {
                     throw java.net.SocketException("Socket not connected after creation")
                 }
-                
+
                 // Log connection details
                 val connectedLocalAddress = socket.localAddress.hostAddress
                 val connectedLocalPort = socket.localPort
                 Log.d(TAG, "Successfully connected from $connectedLocalAddress:$connectedLocalPort to $targetIp:$targetPort")
-                
+
                 currentSocket = socket
                 return@withContext socket
             } catch (e: Exception) {
                 lastException = e
                 Log.e(TAG, "Connection attempt $attempt failed: ${e.message}")
-                
+
                 if (attempt < maxRetries) {
                     val delayMs = retryDelayMs * attempt
                     Log.d(TAG, "Waiting ${delayMs}ms before next attempt")
@@ -96,7 +96,7 @@ class FileTransferClient(
             // Get all network interfaces
             val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
             val targetAddress = java.net.InetAddress.getByName(targetIp)
-            
+
             // First, try to find the Wi-Fi Direct interface (p2p)
             interfaces?.toList()?.forEach { networkInterface ->
                 if (networkInterface.isUp && !networkInterface.isLoopback) {
@@ -111,7 +111,7 @@ class FileTransferClient(
                     }
                 }
             }
-            
+
             // Then try to find a matching subnet
             interfaces?.toList()?.forEach { networkInterface ->
                 if (networkInterface.isUp && !networkInterface.isLoopback) {
@@ -127,7 +127,7 @@ class FileTransferClient(
                     }
                 }
             }
-            
+
             // If still not found, try any interface in the 192.168.49.x range
             interfaces?.toList()?.forEach { networkInterface ->
                 if (networkInterface.isUp && !networkInterface.isLoopback) {
@@ -217,7 +217,7 @@ class FileTransferClient(
                 reader.readLine()
             }
             Log.d(TAG, "Received response: $response")
-            
+
             val type = object : TypeToken<List<String>>() {}.type
             val fileList = gson.fromJson<List<String>>(response, type)
             fileList ?: emptyList()
@@ -299,10 +299,10 @@ class FileTransferClient(
             socket = createSocket()
             val writer = PrintWriter(socket.getOutputStream(), true)
             val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
-            
-            val fileDescriptor = context.contentResolver.openFileDescriptor(fileUri, "r") 
+
+            val fileDescriptor = context.contentResolver.openFileDescriptor(fileUri, "r")
                 ?: throw IOException("Failed to open file descriptor for URI: $fileUri")
-            
+
             val fileName = getFileName(context, fileUri)
             val fileSize = fileDescriptor.statSize
             Log.d(TAG, "Preparing to send file: $fileName (size: $fileSize bytes)")
@@ -336,7 +336,7 @@ class FileTransferClient(
                 while (inputStream.read(buffer).also { read = it } != -1) {
                     output.write(buffer, 0, read)
                     totalSent += read
-                    
+
                     // Log progress every second
                     val currentTime = System.currentTimeMillis()
                     if (currentTime - lastProgressUpdate >= 1000) {
@@ -356,9 +356,13 @@ class FileTransferClient(
                 Log.d(TAG, "Received completion status: $completionStatus")
                 return@withContext completionStatus == "SUCCESS"
             } finally {
-                inputStream.close()
-                fileDescriptor.close()
-                output.flush()
+                try {
+                    inputStream.close()
+                    fileDescriptor.close()
+                    output.flush()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error cleaning up resources: ${e.message}")
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Upload error: ${e.message}", e)

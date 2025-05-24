@@ -47,6 +47,12 @@ class FileTransferServer(
                     try {
                         val clientSocket = serverSocket?.accept()
                         if (clientSocket != null) {
+                            // Configure client socket
+                            clientSocket.keepAlive = true
+                            clientSocket.tcpNoDelay = true
+                            clientSocket.sendBufferSize = 65536 // 64KB send buffer
+                            clientSocket.receiveBufferSize = 65536 // 64KB receive buffer
+                            
                             handleClient(clientSocket, onFileReceived)
                         }
                     } catch (e: Exception) {
@@ -71,8 +77,8 @@ class FileTransferServer(
                 val writer = PrintWriter(clientSocket.getOutputStream(), true)
                 val command = reader.readLine()
 
-                when (command) {
-                    "GET_FILE_LIST" -> {
+                when {
+                    command == "GET_FILE_LIST" -> {
                         val fileList = sharedFolder.listFiles(includeNested = true).map { it.name }
                         val jsonList = gson.toJson(fileList)
                         writer.println(jsonList)
@@ -104,7 +110,7 @@ class FileTransferServer(
             try {
                 val input = DataInputStream(BufferedInputStream(clientSocket.getInputStream()))
                 val writer = PrintWriter(clientSocket.getOutputStream(), true)
-                
+
                 writer.println("READY")
                 
                 val fileName = input.readUTF()

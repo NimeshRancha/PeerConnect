@@ -5,6 +5,8 @@ import android.content.Context
 import android.content.Intent
 import android.net.wifi.p2p.WifiP2pManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import com.example.peerconnect.ui.screens.PeerDiscoveryViewModel
 
@@ -33,7 +35,14 @@ class WifiDirectBroadcastReceiver(
                 
                 WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION -> {
                     Log.d(TAG, "P2P peers changed")
+                    // Request peers immediately
                     manager.requestPeers(channel, peerListener)
+                    
+                    // Also request peers after a short delay to catch status updates
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        Log.d(TAG, "Requesting peer list update after delay")
+                        manager.requestPeers(channel, peerListener)
+                    }, 1000) // 1 second delay
                 }
 
                 WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION -> {
@@ -46,9 +55,12 @@ class WifiDirectBroadcastReceiver(
                             manager.requestConnectionInfo(channel) { info ->
                                 if (info != null && info.groupFormed) {
                                     Log.d(TAG, "Connected to P2P network. Group owner: ${info.isGroupOwner}, Address: ${info.groupOwnerAddress?.hostAddress}")
+                                    // Update connection state through the viewModel
+                                    viewModel.connectionManager.updateConnectionState(isConnected = true)
                                     connectionInfoListener.onConnectionInfoAvailable(info)
                                 } else {
                                     Log.d(TAG, "Connection info not available or group not formed")
+                                    viewModel.connectionManager.updateConnectionState(isConnected = false)
                                 }
                             }
                         } else {
@@ -58,6 +70,7 @@ class WifiDirectBroadcastReceiver(
                                 viewModel.disconnect()
                             } else {
                                 Log.d(TAG, "No group formed yet")
+                                viewModel.connectionManager.updateConnectionState(isConnected = false)
                             }
                         }
                     }

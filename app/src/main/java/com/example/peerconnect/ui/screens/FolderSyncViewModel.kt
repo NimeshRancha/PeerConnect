@@ -34,6 +34,8 @@ class FolderSyncViewModel(application: Application) : AndroidViewModel(applicati
     var isConnected by mutableStateOf(false)
         private set
 
+
+
     private var sharedFolder: SharedFolder? = null
     private var fileTransferClient: FileTransferClient? = null
     private var fileTransferServer: FileTransferServer? = null
@@ -141,32 +143,24 @@ class FolderSyncViewModel(application: Application) : AndroidViewModel(applicati
     fun setRemotePeer(ipAddress: String) {
         Log.d(TAG, "Connecting to peer at $ipAddress")
         
-        // Ensure server is running before connecting
-        if (!isServerRunning) {
-            Log.d(TAG, "Starting server before connecting to peer")
-            val tempUri = createTempFolder(context)
-            setLocalFolder(tempUri)
-        }
-
-        // Cancel any existing client
-        fileTransferClient?.cleanup()
-
         viewModelScope.launch {
             try {
-                // Add delay to ensure server is fully started
-                delay(2000)
-                
-                // Validate IP address format
-                if (!ipAddress.matches(Regex("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$"))) {
-                    throw IllegalArgumentException("Invalid IP address format")
+                // Start our server first
+                if (!isServerRunning) {
+                    Log.d(TAG, "Starting server before connecting to peer")
+                    val tempUri = createTempFolder(context)
+                    setLocalFolder(tempUri)
+                    delay(1000) // Brief delay to ensure server is started
                 }
 
+                // Now connect to the peer's server
+                fileTransferClient?.cleanup()
                 fileTransferClient = FileTransferClient(
                     context = context,
                     targetIp = ipAddress,
-                    connectionTimeoutMs = 15000, // 15 seconds timeout
+                    connectionTimeoutMs = 15000,
                     maxRetries = 5,
-                    retryDelayMs = 2000 // 2 seconds between retries
+                    retryDelayMs = 2000
                 )
                 
                 // Test connection by requesting file list
@@ -188,6 +182,14 @@ class FolderSyncViewModel(application: Application) : AndroidViewModel(applicati
                 fileTransferClient?.cleanup()
                 fileTransferClient = null
             }
+        }
+    }
+
+    // Add this function to handle server startup separately
+    private fun ensureServerRunning() {
+        if (!isServerRunning && sharedFolder == null) {
+            val tempUri = createTempFolder(context)
+            setLocalFolder(tempUri)
         }
     }
 

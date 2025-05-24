@@ -221,13 +221,15 @@ class ConnectionManager(
     fun disconnect() {
         if (!hasRequiredPermissions()) return
 
+        var state_connected = _connectionState.value.isConnected
         try {
             Log.d(TAG, "Initiating disconnect")
             cancelConnectionTimeout()
             stopKeepAlive()
+            Log.d(TAG, state_connected.toString())
             
             // Only try to remove group if we're connected or connecting
-            if (_connectionState.value.isConnected || _connectionState.value.isConnecting) {
+            if (_connectionState.value.isConnected) {
                 manager.removeGroup(channel, object : WifiP2pManager.ActionListener {
                     override fun onSuccess() {
                         Log.d(TAG, "Successfully removed from group")

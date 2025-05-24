@@ -14,10 +14,12 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresPermission
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -28,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.peerconnect.util.ConnectionState
+import com.example.peerconnect.util.DeviceStatusUtils
 import com.example.peerconnect.util.WifiDirectBroadcastReceiver
 
 @Composable
@@ -152,10 +155,18 @@ fun PeerDiscoveryScreen(
 
     // Cleanup on dispose
     DisposableEffect(Unit) {
-        context.registerReceiver(receiver, intentFilter)
+        ContextCompat.registerReceiver(
+            context,
+            receiver,
+            intentFilter,
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
         onDispose {
             context.unregisterReceiver(receiver)
-            viewModel.disconnect()
+            // Only disconnect if we're not navigating to FolderSyncScreen
+            if (!viewModel.connectionState.isConnected) {
+                viewModel.disconnect()
+            }
         }
     }
 }
@@ -226,23 +237,37 @@ fun PeerDeviceCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                getDeviceStatus(device.status),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
+                        .background(
+                            color = when (device.status) {
+                                WifiP2pDevice.CONNECTED -> MaterialTheme.colorScheme.primary
+                                WifiP2pDevice.INVITED -> MaterialTheme.colorScheme.tertiary
+                                WifiP2pDevice.AVAILABLE -> MaterialTheme.colorScheme.secondary
+                                WifiP2pDevice.FAILED -> MaterialTheme.colorScheme.error
+                                else -> MaterialTheme.colorScheme.outline
+                            },
+                            shape = CircleShape
+                        )
+                )
+                Text(
+                    DeviceStatusUtils.getDeviceStatus(device.status),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = when (device.status) {
+                        WifiP2pDevice.CONNECTED -> MaterialTheme.colorScheme.primary
+                        WifiP2pDevice.INVITED -> MaterialTheme.colorScheme.tertiary
+                        WifiP2pDevice.AVAILABLE -> MaterialTheme.colorScheme.secondary
+                        WifiP2pDevice.FAILED -> MaterialTheme.colorScheme.error
+                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                )
+            }
         }
-    }
-}
-
-private fun getDeviceStatus(deviceStatus: Int): String {
-    return when (deviceStatus) {
-        WifiP2pDevice.AVAILABLE -> "Available"
-        WifiP2pDevice.INVITED -> "Invited"
-        WifiP2pDevice.CONNECTED -> "Connected"
-        WifiP2pDevice.FAILED -> "Failed"
-        WifiP2pDevice.UNAVAILABLE -> "Unavailable"
-        else -> "Unknown"
     }
 }
 
