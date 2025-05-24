@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.net.wifi.p2p.WifiP2pInfo
+import android.net.wifi.p2p.WifiP2pManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -28,8 +29,14 @@ import androidx.compose.material3.MaterialTheme
 @Composable
 fun FolderSyncScreen(
     connectionInfo: WifiP2pInfo? = null,
+    manager: WifiP2pManager,
+    channel: WifiP2pManager.Channel,
     viewModel: FolderSyncViewModel = viewModel(
-        factory = FolderSyncViewModel.provideFactory(LocalContext.current)
+        factory = FolderSyncViewModel.provideFactory(
+            LocalContext.current,
+            manager,
+            channel
+        )
     )
 ) {
     val context = LocalContext.current

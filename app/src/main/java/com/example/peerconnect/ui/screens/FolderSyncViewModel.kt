@@ -3,22 +3,30 @@ package com.example.peerconnect.ui.screens
 import android.app.Application
 import android.content.Context
 import android.net.Uri
+import android.net.wifi.p2p.WifiP2pManager
 import android.provider.DocumentsContract
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.example.peerconnect.util.ConnectionManager
 import com.example.peerconnect.util.FileTransferClient
 import com.example.peerconnect.util.FileTransferServer
 import com.example.peerconnect.util.SharedFolder
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onEach
 
-class FolderSyncViewModel(application: Application) : AndroidViewModel(application) {
+class FolderSyncViewModel(
+    application: Application,
+    private val connectionManager: ConnectionManager
+) : AndroidViewModel(application) {
     var localFolderUri by mutableStateOf<Uri?>(null)
         private set
 
@@ -327,6 +335,8 @@ class FolderSyncViewModel(application: Application) : AndroidViewModel(applicati
         isConnected = false
         remoteFiles = emptyList()
         errorMessage = null
+        // Use ConnectionManager for proper Wi-Fi Direct disconnection
+        connectionManager.disconnect()
     }
 
     override fun onCleared() {
@@ -344,7 +354,18 @@ class FolderSyncViewModel(application: Application) : AndroidViewModel(applicati
         private const val MAX_SERVER_RETRIES = 3
         private const val SERVER_RETRY_DELAY = 1000L // 1 second
 
-        fun provideFactory(context: Context): ViewModelProvider.Factory =
-            ViewModelProvider.AndroidViewModelFactory(context.applicationContext as Application)
+        fun provideFactory(
+            context: Context,
+            manager: WifiP2pManager,
+            channel: WifiP2pManager.Channel
+        ): ViewModelProvider.Factory =
+            object : ViewModelProvider.Factory {
+                @Suppress("UNCHECKED_CAST")
+                override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                    val app = context.applicationContext as Application
+                    val connectionManager = ConnectionManager(context, manager, channel)
+                    return FolderSyncViewModel(app, connectionManager) as T
+                }
+            }
     }
 } 

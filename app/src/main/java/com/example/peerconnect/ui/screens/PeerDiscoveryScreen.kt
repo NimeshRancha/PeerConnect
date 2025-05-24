@@ -32,11 +32,11 @@ import com.example.peerconnect.util.WifiDirectBroadcastReceiver
 
 @Composable
 fun PeerDiscoveryScreen(
-    onConnectionInfoChanged: (WifiP2pInfo) -> Unit = {}
+    onConnectionInfoChanged: (WifiP2pInfo) -> Unit = {},
+    manager: WifiP2pManager,
+    channel: WifiP2pManager.Channel
 ) {
     val context = LocalContext.current
-    val manager = remember { context.getSystemService(Context.WIFI_P2P_SERVICE) as WifiP2pManager }
-    val channel = remember { manager.initialize(context, context.mainLooper, null) }
     var showDisconnectDialog by remember { mutableStateOf(false) }
 
     val viewModel = viewModel<PeerDiscoveryViewModel>(
@@ -205,9 +205,9 @@ fun PeerDiscoveryScreen(
         context.registerReceiver(receiver, intentFilter)
         onDispose {
             context.unregisterReceiver(receiver)
-            if (!viewModel.isNavigatingToFolderSync()) {
-                viewModel.disconnect()
-            }
+//            if (!viewModel.isNavigatingToFolderSync()) {
+//                viewModel.disconnect()
+//            }
         }
     }
 }
