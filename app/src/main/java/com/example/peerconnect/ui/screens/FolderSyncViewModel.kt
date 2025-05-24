@@ -22,6 +22,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
+import androidx.documentfile.provider.DocumentFile
 
 class FolderSyncViewModel(
     application: Application,
@@ -53,13 +54,44 @@ class FolderSyncViewModel(
         get() = getApplication<Application>().applicationContext
 
     init {
-        // Create a temporary folder for initial server setup
+        // Try to restore the saved folder URI
         viewModelScope.launch {
             try {
+                val prefs = context.getSharedPreferences("folder_prefs", Context.MODE_PRIVATE)
+                val treeUriString = prefs.getString("tree_uri", null)
+                val rootUriString = prefs.getString("root_uri", null)
+                
+                if (treeUriString != null && rootUriString != null) {
+                    val treeUri = Uri.parse(treeUriString)
+                    val rootUri = Uri.parse(rootUriString)
+                    
+                    // Check if we still have permissions for both URIs
+                    val hasTreePermission = context.contentResolver.persistedUriPermissions.any {
+                        it.uri == treeUri && it.isReadPermission && it.isWritePermission
+                    }
+                    
+                    val hasRootPermission = context.contentResolver.persistedUriPermissions.any {
+                        it.uri == rootUri && it.isReadPermission && it.isWritePermission
+                    }
+                    
+                    if (hasTreePermission && hasRootPermission) {
+                        Log.d(TAG, "Restoring saved folder with valid permissions")
+                        setLocalFolder(rootUri)
+                    } else {
+                        Log.d(TAG, "Lost permissions for saved folder, creating temporary folder")
+                        val tempUri = createTempFolder(context)
+                        setLocalFolder(tempUri)
+                    }
+                } else {
+                    Log.d(TAG, "No saved folder found, creating temporary folder")
+                    val tempUri = createTempFolder(context)
+                    setLocalFolder(tempUri)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to restore folder: ${e.message}")
+                // Create a temporary folder as fallback
                 val tempUri = createTempFolder(context)
                 setLocalFolder(tempUri)
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to create temp folder: ${e.message}")
             }
         }
     }
@@ -186,6 +218,11 @@ class FolderSyncViewModel(
                     errorMessage = null
                     Log.d(TAG, "Successfully connected to peer - ${files.size} files available")
                     startConnectionMonitoring()
+                    
+                    // Start listening for server-initiated transfers
+                    fileTransferClient?.startListening { fileName, uri ->
+                        handleServerInitiatedTransfer(fileName, uri)
+                    }
                 } else {
                     throw IllegalStateException("Failed to get file list from peer")
                 }
@@ -195,6 +232,37 @@ class FolderSyncViewModel(
                 isConnected = false
                 fileTransferClient?.cleanup()
                 fileTransferClient = null
+            }
+        }
+    }
+
+    private fun handleServerInitiatedTransfer(fileName: String, uri: Uri) {
+        viewModelScope.launch {
+            try {
+                val folder = sharedFolder ?: throw IllegalStateException("No local folder selected")
+                
+                // Create a new file in the selected folder
+                val docId = DocumentsContract.getTreeDocumentId(folder.folderUri)
+                val docUri = DocumentsContract.buildDocumentUriUsingTree(folder.folderUri, docId)
+                val newFileUri = DocumentsContract.createDocument(
+                    context.contentResolver,
+                    docUri,
+                    "application/octet-stream",
+                    fileName
+                ) ?: throw IllegalStateException("Failed to create destination file")
+
+                // Copy the received file to the shared folder
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    context.contentResolver.openOutputStream(newFileUri)?.use { output ->
+                        input.copyTo(output)
+                    }
+                }
+
+                Log.d(TAG, "Successfully saved server-initiated transfer: $fileName")
+                refreshRemoteFiles()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error handling server-initiated transfer: ${e.message}")
+                errorMessage = "Failed to save received file: ${e.message}"
             }
         }
     }
@@ -274,17 +342,18 @@ class FolderSyncViewModel(
                 val folder = sharedFolder ?: throw IllegalStateException("No local folder selected")
                 val client = fileTransferClient ?: throw IllegalStateException("No remote peer connected")
 
-                // Create a new file in the selected folder
-                val docId = DocumentsContract.getTreeDocumentId(folder.folderUri)
-                val docUri = DocumentsContract.buildDocumentUriUsingTree(folder.folderUri, docId)
-                val newFileUri = DocumentsContract.createDocument(
-                    context.contentResolver,
-                    docUri,
-                    "application/octet-stream",
-                    fileName
-                ) ?: throw IllegalStateException("Failed to create destination file")
+                // Use DocumentFile to create the new file
+                val treeUri = Uri.parse(context.getSharedPreferences("folder_prefs", Context.MODE_PRIVATE)
+                    .getString("tree_uri", null))
+                    ?: throw IllegalStateException("No saved tree URI")
 
-                val success = client.requestFile(fileName, newFileUri)
+                val pickedFolder = DocumentFile.fromTreeUri(context, treeUri)
+                    ?: throw IllegalStateException("Failed to access folder")
+
+                val newFile = pickedFolder.createFile("application/octet-stream", fileName)
+                    ?: throw IllegalStateException("Failed to create destination file")
+
+                val success = client.requestFile(fileName, newFile.uri)
                 if (!success) {
                     throw IllegalStateException("Failed to download file")
                 }
@@ -309,16 +378,21 @@ class FolderSyncViewModel(
                 }
 
                 val client = fileTransferClient ?: throw IllegalStateException("No remote peer connected")
-                Log.d("FolderSyncViewModel", "Starting file upload to peer")
+                Log.d(TAG, "Starting file upload to peer")
+                
+                // Use DocumentFile to get the file name
+                val documentFile = DocumentFile.fromSingleUri(context, uri)
+                    ?: throw IllegalStateException("Failed to access file")
+                
                 val success = client.sendFile(uri)
                 if (!success) {
                     errorMessage = "Failed to upload file"
-                    Log.e("FolderSyncViewModel", "File upload failed")
+                    Log.e(TAG, "File upload failed")
                 } else {
-                    Log.d("FolderSyncViewModel", "File upload completed successfully")
+                    Log.d(TAG, "File upload completed successfully")
                 }
             } catch (e: Exception) {
-                Log.e("FolderSyncViewModel", "Upload error: ${e.message}", e)
+                Log.e(TAG, "Upload error: ${e.message}", e)
                 errorMessage = "Failed to upload file: ${e.message}"
             } finally {
                 isLoading = false

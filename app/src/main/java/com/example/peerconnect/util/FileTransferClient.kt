@@ -8,12 +8,16 @@ import android.util.Log
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.io.*
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.SocketException
+import androidx.core.content.FileProvider
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 
 class FileTransferClient(
     private val context: Context,
@@ -26,6 +30,8 @@ class FileTransferClient(
     private val gson = Gson()
     private var currentSocket: Socket? = null
     private val TAG = "FileTransferClient"
+    private var isListening = false
+    private var listenerJob: Job? = null
 
     private suspend fun createSocket(): Socket = withContext(Dispatchers.IO) {
         closeCurrentSocket()
@@ -381,7 +387,136 @@ class FileTransferClient(
         } ?: "file.bin"
     }
 
+    fun startListening(onFileReceived: (String, Uri) -> Unit) {
+        if (isListening) {
+            Log.d(TAG, "Already listening for server-initiated transfers")
+            return
+        }
+
+        listenerJob = CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val socket = createSocket()
+                currentSocket = socket
+                isListening = true
+
+                val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
+                val writer = PrintWriter(socket.getOutputStream(), true)
+
+                // Send a special command to indicate this client is ready for server-initiated transfers
+                writer.println("READY_FOR_SERVER_TRANSFERS")
+                Log.d(TAG, "Sent READY_FOR_SERVER_TRANSFERS command")
+
+                // Wait for server acknowledgment
+                val response = reader.readLine()
+                if (response != "OK") {
+                    Log.e(TAG, "Server did not acknowledge transfer readiness: $response")
+                    return@launch
+                }
+                Log.d(TAG, "Server acknowledged transfer readiness")
+
+                while (isListening) {
+                    try {
+                        val command = reader.readLine()
+                        if (command == null) {
+                            Log.d(TAG, "Connection closed by server")
+                            break
+                        }
+
+                        when {
+                            command.startsWith("SERVER_FILE:") -> {
+                                val fileName = command.substringAfter("SERVER_FILE:")
+                                handleServerInitiatedTransfer(socket, fileName, onFileReceived)
+                            }
+                            else -> {
+                                Log.d(TAG, "Received unknown command: $command")
+                            }
+                        }
+                    } catch (e: Exception) {
+                        if (isListening) {
+                            Log.e(TAG, "Error reading from server: ${e.message}")
+                            break
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error in server transfer listener: ${e.message}")
+            } finally {
+                isListening = false
+                closeCurrentSocket()
+            }
+        }
+    }
+
+    private suspend fun handleServerInitiatedTransfer(
+        socket: Socket,
+        fileName: String,
+        onFileReceived: (String, Uri) -> Unit
+    ) {
+        withContext(Dispatchers.IO) {
+            try {
+                val input = DataInputStream(BufferedInputStream(socket.getInputStream()))
+                val receivedFileName = input.readUTF()
+                val fileSize = input.readLong()
+                Log.d(TAG, "Receiving server-initiated file: $receivedFileName (size: $fileSize bytes)")
+
+                // Create a temporary file to store the received data
+                val tempFile = File.createTempFile("server_transfer_", "_$receivedFileName")
+                val outputStream = FileOutputStream(tempFile)
+
+                try {
+                    val buffer = ByteArray(8192)
+                    var totalRead = 0L
+                    var lastProgressUpdate = System.currentTimeMillis()
+
+                    while (totalRead < fileSize) {
+                        val remaining = fileSize - totalRead
+                        val read = input.read(buffer, 0, minOf(buffer.size, remaining.toInt()))
+                        if (read == -1) break
+                        outputStream.write(buffer, 0, read)
+                        totalRead += read
+
+                        val now = System.currentTimeMillis()
+                        if (now - lastProgressUpdate >= 1000) {
+                            val progress = (totalRead * 100.0 / fileSize).toInt()
+                            Log.d(TAG, "Server transfer progress: $progress% ($totalRead/$fileSize bytes)")
+                            lastProgressUpdate = now
+                        }
+                    }
+
+                    outputStream.flush()
+
+                    if (totalRead == fileSize) {
+                        // Convert the temporary file to a content URI
+                        val contentUri = FileProvider.getUriForFile(
+                            context,
+                            "${context.packageName}.fileprovider",
+                            tempFile
+                        )
+                        onFileReceived(receivedFileName, contentUri)
+                        Log.d(TAG, "Server-initiated file transfer completed: $receivedFileName")
+                    } else {
+                        Log.e(TAG, "Server transfer incomplete: $totalRead/$fileSize bytes")
+                        tempFile.delete()
+                    }
+                } finally {
+                    outputStream.close()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error handling server-initiated transfer: ${e.message}")
+                throw e
+            }
+        }
+    }
+
+    fun stopListening() {
+        isListening = false
+        listenerJob?.cancel()
+        listenerJob = null
+        closeCurrentSocket()
+    }
+
     fun cleanup() {
+        stopListening()
         closeCurrentSocket()
     }
 }

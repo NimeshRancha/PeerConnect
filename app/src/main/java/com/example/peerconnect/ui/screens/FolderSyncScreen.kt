@@ -24,6 +24,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.MaterialTheme
+import android.provider.DocumentsContract
+import android.util.Log
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -43,6 +45,7 @@ fun FolderSyncScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     var wasConnected by remember { mutableStateOf(false) }
     var showDisconnectDialog by remember { mutableStateOf(false) }
+    var showPermissionError by remember { mutableStateOf(false) }
 
     // Effect to handle connection info changes
     LaunchedEffect(connectionInfo) {
@@ -63,6 +66,14 @@ fun FolderSyncScreen(
             )
         }
         wasConnected = viewModel.isConnected
+    }
+
+    // Effect to show permission error
+    LaunchedEffect(showPermissionError) {
+        if (showPermissionError) {
+            snackbarHostState.showSnackbar("Failed to get folder access. Please try again.")
+            showPermissionError = false
+        }
     }
 
     if (showDisconnectDialog) {
@@ -96,12 +107,35 @@ fun FolderSyncScreen(
         contract = ActivityResultContracts.OpenDocumentTree(),
         onResult = { uri: Uri? ->
             uri?.let {
-                // Persist permission
-                context.contentResolver.takePersistableUriPermission(
-                    it,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                )
-                viewModel.setLocalFolder(it)
+                try {
+                    // Take persistable URI permission for the tree URI only
+                    val takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION or 
+                                  Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                    
+                    // Take permission for the tree URI
+                    context.contentResolver.takePersistableUriPermission(it, takeFlags)
+                    
+                    // Get the root document ID and build the proper URI
+                    val rootId = DocumentsContract.getTreeDocumentId(it)
+                    val rootUri = DocumentsContract.buildDocumentUriUsingTree(it, rootId)
+                    
+                    // Save both URIs to SharedPreferences
+                    context.getSharedPreferences("folder_prefs", Context.MODE_PRIVATE)
+                        .edit()
+                        .apply {
+                            putString("tree_uri", it.toString())
+                            putString("root_uri", rootUri.toString())
+                            apply()
+                        }
+                    
+                    // Set the folder in the ViewModel
+                    viewModel.setLocalFolder(rootUri)
+                    
+                    Log.d("FolderSyncScreen", "Successfully persisted URI permissions for: $it")
+                } catch (e: SecurityException) {
+                    Log.e("FolderSyncScreen", "Failed to persist URI permissions: ${e.message}")
+                    showPermissionError = true
+                }
             }
         }
     )
@@ -214,7 +248,9 @@ fun FolderSyncScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Button(
-                            onClick = { folderPickerLauncher.launch(null) },
+                            onClick = { 
+                                folderPickerLauncher.launch(null) 
+                            },
                             modifier = Modifier.weight(1f)
                         ) {
                             Text("Select Folder to Sync")
