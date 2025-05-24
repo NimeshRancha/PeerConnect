@@ -67,6 +67,12 @@ class PeerDiscoveryViewModel(
         connectionManager.disconnect()
     }
 
+    fun cancelInvitation() {
+        // Reset navigation state
+        navigatingToFolderSync = false
+        connectionManager.cancelInvitation()
+    }
+
     override fun onCleared() {
         super.onCleared()
         // Only disconnect if we're not navigating to FolderSync

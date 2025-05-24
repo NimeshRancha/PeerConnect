@@ -47,6 +47,19 @@ class ConnectionManager(
         }
     }
 
+    private var lastActionTimestamp = 0L
+    private val MIN_ACTION_INTERVAL = 500L // 500ms minimum interval between actions
+
+    private fun canPerformAction(): Boolean {
+        val now = System.currentTimeMillis()
+        if (now - lastActionTimestamp < MIN_ACTION_INTERVAL) {
+            Log.d(TAG, "Action blocked: too soon after last action")
+            return false
+        }
+        lastActionTimestamp = now
+        return true
+    }
+
     fun updateConnectionState(
         isConnecting: Boolean = false,
         isConnected: Boolean = false,
@@ -105,6 +118,9 @@ class ConnectionManager(
         }
     }
 
+    private var connectionRetryCount = 0
+    private val MAX_RETRY_ATTEMPTS = 2
+
     fun connectToPeer(device: WifiP2pDevice) {
         if (!hasRequiredPermissions()) {
             updateConnectionState(
@@ -114,13 +130,18 @@ class ConnectionManager(
             return
         }
 
+        if (!canPerformAction()) {
+            Log.d(TAG, "Ignoring connect request: too soon after last action")
+            return
+        }
+
         try {
             // Cancel any existing connection attempt
             cancelConnectionTimeout()
             
             // Reset connection state
             updateConnectionState(isConnecting = true)
-            
+
             val config = WifiP2pConfig().apply {
                 deviceAddress = device.deviceAddress
                 // Set connection timeout and group owner preferences
@@ -129,6 +150,8 @@ class ConnectionManager(
 
             Log.d(TAG, "Initiating connection to device: ${device.deviceAddress}")
             connectedDevice = device
+            
+            // Start connection timeout before initiating connection
             startConnectionTimeout()
 
             manager.connect(channel, config, object : WifiP2pManager.ActionListener {
@@ -147,6 +170,11 @@ class ConnectionManager(
                     }
                     Log.e(TAG, "Connection failed: $message")
                     handleDisconnection(message)
+                    
+                    // Restart discovery after connection failure
+                    handler.postDelayed({
+                        restartDiscovery()
+                    }, 500)
                 }
             })
         } catch (e: SecurityException) {
@@ -155,6 +183,32 @@ class ConnectionManager(
         } catch (e: Exception) {
             Log.e(TAG, "Unexpected error during connect: ${e.message}")
             handleDisconnection("Unexpected error: ${e.message}")
+        }
+    }
+
+    private fun getDeviceStatus(status: Int): String {
+        return when (status) {
+            WifiP2pDevice.AVAILABLE -> "Available"
+            WifiP2pDevice.INVITED -> "Invited"
+            WifiP2pDevice.CONNECTED -> "Connected"
+            WifiP2pDevice.FAILED -> "Failed"
+            WifiP2pDevice.UNAVAILABLE -> "Unavailable"
+            else -> "Unknown"
+        }
+    }
+
+    private fun restartDiscovery() {
+        try {
+            manager.discoverPeers(channel, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() {
+                    Log.d(TAG, "Successfully restarted peer discovery")
+                }
+                override fun onFailure(reason: Int) {
+                    Log.e(TAG, "Failed to restart peer discovery")
+                }
+            })
+        } catch (e: Exception) {
+            Log.e(TAG, "Error restarting discovery: ${e.message}")
         }
     }
 
@@ -201,12 +255,186 @@ class ConnectionManager(
 
     private fun handleDisconnection(reason: String) {
         Log.d(TAG, "Handling disconnection: $reason")
-        updateConnectionState(
+        updateStateAndRequestPeers(
             isConnected = false,
             errorMessage = reason
         )
         connectedDevice = null
         _connectionInfo.value = null
+        Log.d(TAG, "Device disconnected: $reason")
+    }
+
+    private fun updateStateAndRequestPeers(
+        isConnecting: Boolean = false,
+        isConnected: Boolean = false,
+        connectionFailed: Boolean = false,
+        errorMessage: String? = null
+    ) {
+        updateConnectionState(isConnecting, isConnected, connectionFailed, errorMessage)
+        // Request peers update to refresh device states
+        try {
+            manager.requestPeers(channel) { /* Using empty listener as the broadcast receiver will handle the update */ }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error requesting peers update: ${e.message}")
+        }
+    }
+
+    fun disconnect() {
+        if (!hasRequiredPermissions()) return
+        if (!canPerformAction()) {
+            Log.d(TAG, "Ignoring disconnect request: too soon after last action")
+            return
+        }
+
+        try {
+            Log.d(TAG, "Initiating system-level disconnect")
+            cancelConnectionTimeout()
+            stopKeepAlive()
+            
+            // First, update state to ensure UI reflects disconnection immediately
+            updateStateAndRequestPeers(
+                isConnected = false,
+                errorMessage = "Disconnecting"
+            )
+
+            // Cancel any ongoing discovery first
+            manager.stopPeerDiscovery(channel, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() {
+                    Log.d(TAG, "Successfully stopped peer discovery")
+                    proceedWithDisconnect()
+                }
+                override fun onFailure(reason: Int) {
+                    Log.e(TAG, "Failed to stop peer discovery, proceeding anyway")
+                    proceedWithDisconnect()
+                }
+            })
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during disconnect: ${e.message}")
+            handleDisconnection("Error during disconnect: ${e.message}")
+        }
+    }
+
+    private fun proceedWithDisconnect() {
+        try {
+            // First try to cancel any pending connections
+            manager.cancelConnect(channel, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() {
+                    Log.d(TAG, "Successfully cancelled pending connections")
+                    removeGroupAndReset()
+                }
+                override fun onFailure(reason: Int) {
+                    Log.d(TAG, "No pending connections to cancel or cancellation failed")
+                    removeGroupAndReset()
+                }
+            })
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in proceedWithDisconnect: ${e.message}")
+            removeGroupAndReset()
+        }
+    }
+
+    private fun removeGroupAndReset() {
+        try {
+            // Then remove any existing group
+            manager.removeGroup(channel, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() {
+                    Log.d(TAG, "Successfully removed P2P group")
+                    resetStateAndRestartDiscovery()
+                }
+                override fun onFailure(reason: Int) {
+                    Log.e(TAG, "Failed to remove P2P group: $reason")
+                    resetStateAndRestartDiscovery()
+                }
+            })
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in removeGroupAndReset: ${e.message}")
+            resetStateAndRestartDiscovery()
+        }
+    }
+
+    private fun resetStateAndRestartDiscovery() {
+        // Reset all state variables
+        connectedDevice = null
+        _connectionInfo.value = null
+        updateConnectionState(
+            isConnected = false,
+            errorMessage = "Disconnected"
+        )
+
+        // Add a small delay before restarting discovery
+        handler.postDelayed({
+            try {
+                // Request peers to refresh the list
+                manager.requestPeers(channel) { /* Using empty listener as the broadcast receiver will handle the update */ }
+                
+                // Restart peer discovery
+                manager.discoverPeers(channel, object : WifiP2pManager.ActionListener {
+                    override fun onSuccess() {
+                        Log.d(TAG, "Successfully restarted peer discovery")
+                        // Request peers again after discovery starts
+                        handler.postDelayed({
+                            try {
+                                manager.requestPeers(channel) { /* Using empty listener as the broadcast receiver will handle the update */ }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Error requesting peers after discovery restart: ${e.message}")
+                            }
+                        }, 1000)
+                    }
+                    override fun onFailure(reason: Int) {
+                        Log.e(TAG, "Failed to restart peer discovery")
+                    }
+                })
+            } catch (e: Exception) {
+                Log.e(TAG, "Error in resetStateAndRestartDiscovery: ${e.message}")
+            }
+        }, 500)
+    }
+
+    fun cancelInvitation() {
+        if (!hasRequiredPermissions()) return
+        if (!canPerformAction()) {
+            Log.d(TAG, "Ignoring cancel invitation request: too soon after last action")
+            return
+        }
+
+        try {
+            Log.d(TAG, "Canceling invitation")
+            cancelConnectionTimeout()
+            stopKeepAlive()
+            
+            manager.cancelConnect(channel, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() {
+                    Log.d(TAG, "Successfully canceled invitation")
+                    handler.postDelayed({
+                        updateStateAndRequestPeers(
+                            isConnected = false,
+                            errorMessage = "Invitation canceled"
+                        )
+                        connectedDevice = null
+                        _connectionInfo.value = null
+                        Log.d(TAG, "Invitation canceled successfully")
+                    }, 100)
+                }
+
+                override fun onFailure(reason: Int) {
+                    val message = when (reason) {
+                        WifiP2pManager.BUSY -> "System is busy"
+                        WifiP2pManager.ERROR -> "Internal error"
+                        else -> "Error code: $reason"
+                    }
+                    Log.e(TAG, "Failed to cancel invitation: $message")
+                    updateStateAndRequestPeers(
+                        isConnected = false,
+                        errorMessage = "Failed to cancel invitation"
+                    )
+                    connectedDevice = null
+                    _connectionInfo.value = null
+                }
+            })
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during invitation cancellation: ${e.message}")
+            handleDisconnection("Error during invitation cancellation: ${e.message}")
+        }
     }
 
     private fun startKeepAlive() {
@@ -216,50 +444,6 @@ class ConnectionManager(
 
     private fun stopKeepAlive() {
         handler.removeCallbacks(keepAliveRunnable)
-    }
-
-    fun disconnect() {
-        if (!hasRequiredPermissions()) return
-
-        try {
-            Log.d(TAG, "Initiating disconnect")
-            cancelConnectionTimeout()
-            stopKeepAlive()
-            
-            // Only try to remove group if we're connected or connecting
-            if (_connectionState.value.isConnected || _connectionState.value.isConnecting) {
-                manager.removeGroup(channel, object : WifiP2pManager.ActionListener {
-                    override fun onSuccess() {
-                        Log.d(TAG, "Successfully removed from group")
-                        updateConnectionState()
-                        connectedDevice = null
-                        _connectionInfo.value = null
-                    }
-
-                    override fun onFailure(reason: Int) {
-                        val message = when (reason) {
-                            WifiP2pManager.BUSY -> "System is busy"
-                            WifiP2pManager.ERROR -> "Internal error"
-                            else -> "Error code: $reason"
-                        }
-                        Log.e(TAG, "Failed to remove group: $message")
-                        // Still reset the state even if removeGroup fails
-                        updateConnectionState()
-                        connectedDevice = null
-                        _connectionInfo.value = null
-                    }
-                })
-            } else {
-                // Just reset state if we're not connected
-                updateConnectionState()
-                connectedDevice = null
-                _connectionInfo.value = null
-            }
-        } catch (e: SecurityException) {
-            Log.e(TAG, "Security exception during disconnect: ${e.message}")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error during disconnect: ${e.message}")
-        }
     }
 
     private fun hasRequiredPermissions(): Boolean {

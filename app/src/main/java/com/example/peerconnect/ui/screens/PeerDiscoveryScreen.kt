@@ -37,6 +37,7 @@ fun PeerDiscoveryScreen(
     val context = LocalContext.current
     val manager = remember { context.getSystemService(Context.WIFI_P2P_SERVICE) as WifiP2pManager }
     val channel = remember { manager.initialize(context, context.mainLooper, null) }
+    var showDisconnectDialog by remember { mutableStateOf(false) }
 
     val viewModel = viewModel<PeerDiscoveryViewModel>(
         factory = PeerDiscoveryViewModel.provideFactory(context, manager, channel)
@@ -95,6 +96,33 @@ fun PeerDiscoveryScreen(
         }
     }
 
+    if (showDisconnectDialog) {
+        AlertDialog(
+            onDismissRequest = { showDisconnectDialog = false },
+            title = { Text("Disconnect") },
+            text = { Text("Are you sure you want to disconnect from this device?") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showDisconnectDialog = false
+                        viewModel.setNavigatingToFolderSync(false)
+                        viewModel.disconnect()
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error
+                    )
+                ) {
+                    Text("Disconnect")
+                }
+            },
+            dismissButton = {
+                Button(onClick = { showDisconnectDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -115,6 +143,19 @@ fun PeerDiscoveryScreen(
             modifier = Modifier.fillMaxWidth()
         ) {
             Text("Discover Peers")
+        }
+
+        // Disconnect Button
+        if (viewModel.connectionState.isConnected) {
+            Button(
+                onClick = { showDisconnectDialog = true },
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.error
+                )
+            ) {
+                Text("Disconnect")
+            }
         }
 
         // Peer List
@@ -144,6 +185,14 @@ fun PeerDiscoveryScreen(
                         device = device,
                         onConnect = {
                             viewModel.connectToPeer(device)
+                        },
+                        onDisconnect = { peerDevice ->
+                            viewModel.setNavigatingToFolderSync(false)
+                            if (peerDevice.status == WifiP2pDevice.INVITED) {
+                                viewModel.cancelInvitation()
+                            } else {
+                                viewModel.disconnect()
+                            }
                         }
                     )
                 }
@@ -206,34 +255,85 @@ fun ConnectionStatusCard(
 @Composable
 fun PeerDeviceCard(
     device: WifiP2pDevice,
-    onConnect: () -> Unit
+    onConnect: () -> Unit,
+    onDisconnect: (WifiP2pDevice) -> Unit = {}
 ) {
+    var showDisconnectDialog by remember { mutableStateOf(false) }
+
+    if (showDisconnectDialog) {
+        AlertDialog(
+            onDismissRequest = { showDisconnectDialog = false },
+            title = { Text("Disconnect") },
+            text = { Text("Are you sure you want to disconnect from this device?") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showDisconnectDialog = false
+                        onDisconnect(device)
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error
+                    )
+                ) {
+                    Text(if (device.status == WifiP2pDevice.INVITED) "Cancel" else "Disconnect")
+                }
+            },
+            dismissButton = {
+                Button(onClick = { showDisconnectDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onConnect)
+            .clickable(
+                enabled = device.status == WifiP2pDevice.AVAILABLE,
+                onClick = onConnect
+            )
     ) {
-        Column(
+        Row(
             modifier = Modifier
                 .padding(16.dp)
-                .fillMaxWidth()
+                .fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                device.deviceName.ifEmpty { "Unknown Device" },
-                style = MaterialTheme.typography.titleMedium
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                device.deviceAddress,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                getDeviceStatus(device.status),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            // Device Info
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    device.deviceName.ifEmpty { "Unknown Device" },
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    device.deviceAddress,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    getDeviceStatus(device.status),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            // Action button for connected or invited devices
+            if (device.status == WifiP2pDevice.CONNECTED || device.status == WifiP2pDevice.INVITED) {
+                Spacer(modifier = Modifier.width(8.dp))
+                Button(
+                    onClick = { showDisconnectDialog = true },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error
+                    ),
+                    modifier = Modifier.wrapContentWidth()
+                ) {
+                    Text(if (device.status == WifiP2pDevice.INVITED) "Cancel" else "Disconnect")
+                }
+            }
         }
     }
 }

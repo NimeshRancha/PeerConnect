@@ -318,6 +318,17 @@ class FolderSyncViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
+    fun disconnect() {
+        connectionMonitorJob?.cancel()
+        serverStartRetryJob?.cancel()
+        fileTransferServer?.stopServer()
+        fileTransferClient?.cleanup()
+        isServerRunning = false
+        isConnected = false
+        remoteFiles = emptyList()
+        errorMessage = null
+    }
+
     override fun onCleared() {
         super.onCleared()
         connectionMonitorJob?.cancel()

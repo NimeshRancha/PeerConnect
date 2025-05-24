@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -19,7 +21,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.MaterialTheme
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FolderSyncScreen(
     connectionInfo: WifiP2pInfo? = null,
@@ -30,6 +35,7 @@ fun FolderSyncScreen(
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
     var wasConnected by remember { mutableStateOf(false) }
+    var showDisconnectDialog by remember { mutableStateOf(false) }
 
     // Effect to handle connection info changes
     LaunchedEffect(connectionInfo) {
@@ -50,6 +56,32 @@ fun FolderSyncScreen(
             )
         }
         wasConnected = viewModel.isConnected
+    }
+
+    if (showDisconnectDialog) {
+        AlertDialog(
+            onDismissRequest = { showDisconnectDialog = false },
+            title = { Text("Disconnect") },
+            text = { Text("Are you sure you want to disconnect from this device?") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showDisconnectDialog = false
+                        viewModel.disconnect()
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error
+                    )
+                ) {
+                    Text("Disconnect")
+                }
+            },
+            dismissButton = {
+                Button(onClick = { showDisconnectDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 
     // Folder picker launcher
@@ -83,6 +115,28 @@ fun FolderSyncScreen(
     )
 
     Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Folder Sync") },
+                actions = {
+                    if (viewModel.isConnected) {
+                        IconButton(
+                            onClick = { showDisconnectDialog = true }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Disconnect",
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+            )
+        },
         snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { paddingValues ->
         Column(
