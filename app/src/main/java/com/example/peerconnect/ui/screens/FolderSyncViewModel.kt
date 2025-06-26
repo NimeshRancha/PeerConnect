@@ -46,6 +46,9 @@ class FolderSyncViewModel(
     var pendingDownloadConflict by mutableStateOf<DownloadConflict?>(null)
         private set
 
+    var isGroupOwner by mutableStateOf(false)
+        private set
+
     data class DownloadConflict(
         val fileName: String,
         val onDecision: (ConflictDecision) -> Unit
@@ -448,6 +451,10 @@ class FolderSyncViewModel(
         errorMessage = null
         // Use ConnectionManager for proper Wi-Fi Direct disconnection
         connectionManager.disconnect()
+    }
+
+    fun updateGroupOwner(isOwner: Boolean) {
+        isGroupOwner = isOwner
     }
 
     override fun onCleared() {

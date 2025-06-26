@@ -51,6 +51,7 @@ fun FolderSyncScreen(
     // Effect to handle connection info changes
     LaunchedEffect(connectionInfo) {
         connectionInfo?.let { info ->
+            viewModel.updateGroupOwner(info.isGroupOwner)
             if (info.groupFormed) {
                 info.groupOwnerAddress?.hostAddress?.let { groupOwnerAddress ->
                     viewModel.setRemotePeer(groupOwnerAddress)
@@ -284,7 +285,7 @@ fun FolderSyncScreen(
                         ) {
                             Text("Select Folder to Sync")
                         }
-                        if (viewModel.localFolderUri != null) {
+                        if (viewModel.localFolderUri != null && !viewModel.isGroupOwner) {
                             Button(
                                 onClick = { filePickerLauncher.launch(arrayOf("*/*")) },
                                 modifier = Modifier.weight(1f)
@@ -322,7 +323,7 @@ fun FolderSyncScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            "Remote Files",
+                            if (viewModel.isGroupOwner) "My Files" else "Remote Files",
                             style = MaterialTheme.typography.titleMedium
                         )
                         IconButton(onClick = { viewModel.refreshRemoteFiles() }) {
@@ -357,7 +358,8 @@ fun FolderSyncScreen(
                             items(viewModel.remoteFiles) { fileName ->
                                 RemoteFileItem(
                                     fileName = fileName,
-                                    onDownload = { viewModel.downloadFile(fileName) }
+                                    onDownload = { viewModel.downloadFile(fileName) },
+                                    showDownload = !viewModel.isGroupOwner
                                 )
                             }
                         }
@@ -371,7 +373,8 @@ fun FolderSyncScreen(
 @Composable
 private fun RemoteFileItem(
     fileName: String,
-    onDownload: () -> Unit
+    onDownload: () -> Unit,
+    showDownload: Boolean = true
 ) {
     Row(
         modifier = Modifier
@@ -387,8 +390,10 @@ private fun RemoteFileItem(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
-        IconButton(onClick = onDownload) {
-            Text("⬇️")
+        if (showDownload) {
+            IconButton(onClick = onDownload) {
+                Text("⬇️")
+            }
         }
     }
 }
