@@ -26,6 +26,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.MaterialTheme
 import android.provider.DocumentsContract
 import android.util.Log
+import com.example.peerconnect.ui.screens.FolderSyncViewModel.ConflictDecision
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -51,7 +52,9 @@ fun FolderSyncScreen(
     LaunchedEffect(connectionInfo) {
         connectionInfo?.let { info ->
             if (info.groupFormed) {
-                viewModel.setRemotePeer(info.groupOwnerAddress.hostAddress ?: return@let)
+                info.groupOwnerAddress?.hostAddress?.let { groupOwnerAddress ->
+                    viewModel.setRemotePeer(groupOwnerAddress)
+                }
             }
         }
     }
@@ -76,6 +79,8 @@ fun FolderSyncScreen(
         }
     }
 
+    val pendingConflict = viewModel.pendingDownloadConflict
+
     if (showDisconnectDialog) {
         AlertDialog(
             onDismissRequest = { showDisconnectDialog = false },
@@ -97,6 +102,30 @@ fun FolderSyncScreen(
             dismissButton = {
                 Button(onClick = { showDisconnectDialog = false }) {
                     Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (pendingConflict != null) {
+        AlertDialog(
+            onDismissRequest = { pendingConflict.onDecision(ConflictDecision.DISCARD) },
+            title = { Text("File already exists") },
+            text = { Text("A file named '${pendingConflict.fileName}' already exists. What would you like to do?") },
+            confirmButton = {
+                Button(onClick = { pendingConflict.onDecision(ConflictDecision.REPLACE) }) {
+                    Text("Replace")
+                }
+            },
+            dismissButton = {
+                Row {
+                    Button(onClick = { pendingConflict.onDecision(ConflictDecision.RENAME) }) {
+                        Text("Rename")
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Button(onClick = { pendingConflict.onDecision(ConflictDecision.DISCARD) }) {
+                        Text("Discard")
+                    }
                 }
             }
         )

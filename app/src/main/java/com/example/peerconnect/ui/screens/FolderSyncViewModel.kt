@@ -43,6 +43,18 @@ class FolderSyncViewModel(
     var isConnected by mutableStateOf(false)
         private set
 
+    var pendingDownloadConflict by mutableStateOf<DownloadConflict?>(null)
+        private set
+
+    data class DownloadConflict(
+        val fileName: String,
+        val onDecision: (ConflictDecision) -> Unit
+    )
+
+    enum class ConflictDecision {
+        REPLACE, RENAME, DISCARD
+    }
+
     private var sharedFolder: SharedFolder? = null
     private var fileTransferClient: FileTransferClient? = null
     private var fileTransferServer: FileTransferServer? = null
@@ -340,9 +352,6 @@ class FolderSyncViewModel(
             errorMessage = null
             try {
                 val folder = sharedFolder ?: throw IllegalStateException("No local folder selected")
-                val client = fileTransferClient ?: throw IllegalStateException("No remote peer connected")
-
-                // Use DocumentFile to create the new file
                 val treeUri = Uri.parse(context.getSharedPreferences("folder_prefs", Context.MODE_PRIVATE)
                     .getString("tree_uri", null))
                     ?: throw IllegalStateException("No saved tree URI")
@@ -350,18 +359,82 @@ class FolderSyncViewModel(
                 val pickedFolder = DocumentFile.fromTreeUri(context, treeUri)
                     ?: throw IllegalStateException("Failed to access folder")
 
-                val newFile = pickedFolder.createFile("application/octet-stream", fileName)
-                    ?: throw IllegalStateException("Failed to create destination file")
-
-                val success = client.requestFile(fileName, newFile.uri)
-                if (!success) {
-                    throw IllegalStateException("Failed to download file")
+                val existingFile = pickedFolder.findFile(fileName)
+                if (existingFile != null) {
+                    // Conflict: ask user
+                    pendingDownloadConflict = DownloadConflict(fileName) { decision ->
+                        pendingDownloadConflict = null
+                        handleDownloadConflict(decision, fileName, pickedFolder)
+                    }
+                    isLoading = false
+                    return@launch
                 }
+
+                // No conflict, proceed as before
+                handleDownloadConflict(ConflictDecision.REPLACE, fileName, pickedFolder)
             } catch (e: Exception) {
                 errorMessage = "Failed to download file: ${e.message}"
             } finally {
                 isLoading = false
             }
+        }
+    }
+
+    private fun handleDownloadConflict(
+        decision: ConflictDecision,
+        fileName: String,
+        pickedFolder: DocumentFile
+    ) {
+        viewModelScope.launch {
+            try {
+                val client = fileTransferClient ?: throw IllegalStateException("No remote peer connected")
+                when (decision) {
+                    ConflictDecision.REPLACE -> {
+                        pickedFolder.findFile(fileName)?.delete()
+                        saveDownloadedFile(fileName, fileName, pickedFolder, client)
+                    }
+                    ConflictDecision.RENAME -> {
+                        var baseName = fileName
+                        var extension = ""
+                        val dotIndex = fileName.lastIndexOf('.')
+                        if (dotIndex != -1) {
+                            baseName = fileName.substring(0, dotIndex)
+                            extension = fileName.substring(dotIndex)
+                        }
+                        var uniqueName = fileName
+                        var counter = 1
+                        while (pickedFolder.findFile(uniqueName) != null) {
+                            uniqueName = if (extension.isNotEmpty()) {
+                                "${baseName}(${counter})${extension}"
+                            } else {
+                                "${baseName}(${counter})"
+                            }
+                            counter++
+                        }
+                        saveDownloadedFile(fileName, uniqueName, pickedFolder, client)
+                    }
+                    ConflictDecision.DISCARD -> {
+                        // Do nothing
+                    }
+                }
+            } catch (e: Exception) {
+                errorMessage = "Failed to download file: ${e.message}"
+            }
+        }
+    }
+
+    private suspend fun saveDownloadedFile(
+        serverFileName: String,
+        localFileName: String,
+        pickedFolder: DocumentFile,
+        client: FileTransferClient
+    ) {
+        val newFile = pickedFolder.createFile("application/octet-stream", localFileName)
+            ?: throw IllegalStateException("Failed to create destination file")
+
+        val success = client.requestFile(serverFileName, newFile.uri)
+        if (!success) {
+            throw IllegalStateException("Failed to download file")
         }
     }
 

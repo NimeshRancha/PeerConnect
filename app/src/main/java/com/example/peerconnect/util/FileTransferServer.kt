@@ -20,6 +20,7 @@ import java.io.InputStreamReader
 import java.io.PrintWriter
 import java.net.ServerSocket
 import java.net.Socket
+import androidx.documentfile.provider.DocumentFile
 
 class FileTransferServer(
     private val context: Context,
@@ -133,6 +134,7 @@ class FileTransferServer(
                 }
 
                 writer.println("OK")
+                writer.flush()
                 Log.d(TAG, "Starting file download: $fileName")
 
                 val output = DataOutputStream(BufferedOutputStream(clientSocket.getOutputStream()))
@@ -326,23 +328,40 @@ class FileTransferServer(
         try {
             // Get the root document ID from the tree URI
             val rootId = DocumentsContract.getTreeDocumentId(folderUri)
-            
             // Build the root document URI
             val rootUri = DocumentsContract.buildDocumentUriUsingTree(folderUri, rootId)
-            
+
+            // Check for existing files and generate a unique name with (1), (2), etc. before the extension
+            val pickedFolder = DocumentFile.fromTreeUri(context, folderUri)
+            var baseName = fileName
+            var extension = ""
+            val dotIndex = fileName.lastIndexOf('.')
+            if (dotIndex != -1) {
+                baseName = fileName.substring(0, dotIndex)
+                extension = fileName.substring(dotIndex)
+            }
+            var uniqueName = fileName
+            var counter = 1
+            while (pickedFolder?.findFile(uniqueName) != null) {
+                uniqueName = if (extension.isNotEmpty()) {
+                    "${baseName}(${counter})${extension}"
+                } else {
+                    "${baseName}(${counter})"
+                }
+                counter++
+            }
+
             // Create new file in the root
             val newFileId = DocumentsContract.createDocument(
                 context.contentResolver,
                 rootUri,
                 "application/octet-stream",
-                fileName
+                uniqueName
             )
-            
             if (newFileId == null) {
-                Log.e(TAG, "Failed to create document: $fileName")
+                Log.e(TAG, "Failed to create document: $uniqueName")
                 return null
             }
-            
             // Build the document URI and ensure we have permission
             val documentUri = newFileId
             try {
@@ -353,7 +372,6 @@ class FileTransferServer(
             } catch (e: SecurityException) {
                 Log.e(TAG, "Failed to take persistable URI permission for new file: ${e.message}")
             }
-            
             return documentUri
         } catch (e: Exception) {
             Log.e(TAG, "Error creating file in folder: ${e.message}")

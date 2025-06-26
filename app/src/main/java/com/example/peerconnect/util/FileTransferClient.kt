@@ -257,6 +257,7 @@ class FileTransferClient(
                 return@withContext false
             }
 
+            // Now switch to DataInputStream after reading the OK line
             val input = DataInputStream(socket.getInputStream())
             val receivedFileName = input.readUTF()
             val fileSize = input.readLong()
