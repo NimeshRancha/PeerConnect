@@ -1,381 +1,222 @@
 package com.example.peerconnect.util
 
 import android.content.Context
-import android.database.Cursor
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.util.Log
+import androidx.core.content.FileProvider
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.*
 import java.io.*
+import java.net.Inet4Address
+import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.NetworkInterface
 import java.net.Socket
-import java.net.SocketException
-import androidx.core.content.FileProvider
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.launch
 
 class FileTransferClient(
     private val context: Context,
+    private val sharedFolder: SharedFolder?,
     private val targetIp: String,
     private val targetPort: Int = 8988,
-    private val connectionTimeoutMs: Int = 5000,
-    private val maxRetries: Int = 3,
-    private val retryDelayMs: Long = 1000
+    private val connectionTimeoutMs: Int = 5000
 ) {
-    private val gson = Gson()
-    private var currentSocket: Socket? = null
     private val TAG = "FileTransferClient"
-    private var isListening = false
+    private val gson = Gson()
+    private var socket: Socket? = null
+    private var writer: PrintWriter? = null
+    private var reader: BufferedReader? = null
     private var listenerJob: Job? = null
+    private var isConnected = false
 
-    private suspend fun createSocket(): Socket = withContext(Dispatchers.IO) {
-        closeCurrentSocket()
-        var lastException: Exception? = null
-        
-        for (attempt in 1..maxRetries) {
+    suspend fun connect(): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val newSocket = Socket()
+
+            newSocket.keepAlive = true
+            newSocket.tcpNoDelay = true
+//            newSocket.soTimeout = connectionTimeoutMs
+            newSocket.reuseAddress = true
+            newSocket.setPerformancePreferences(0, 1, 2)
+            newSocket.receiveBufferSize = 65536
+            newSocket.sendBufferSize = 65536
+
+            val bestLocalAddress = findBestLocalAddress(targetIp)
+            if (bestLocalAddress != null) {
+                try {
+                    newSocket.bind(InetSocketAddress(bestLocalAddress, 0))
+                    Log.d(TAG, "Socket bound to local P2P address: ${bestLocalAddress.hostAddress}")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to bind to P2P address: ${e.message}")
+                    Log.d(TAG, "Attempting connection without explicit bind")
+                }
+            }
+
+            newSocket.connect(InetSocketAddress(targetIp, targetPort), connectionTimeoutMs)
+            socket = newSocket
+            writer = PrintWriter(newSocket.getOutputStream(), true)
+            reader = BufferedReader(InputStreamReader(newSocket.getInputStream()))
+            isConnected = true
+
+            Log.d(TAG, "Connected to server $targetIp:$targetPort")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Connection failed: ${e.message}")
+            disconnect()
+            false
+        }
+    }
+
+    fun disconnect() {
+        try {
+            isConnected = false
+            writer?.close()
+            reader?.close()
+            socket?.close()
+            listenerJob?.cancel()
+            Log.d(TAG, "Disconnected from server")
+        } catch (e: Exception) {
+            Log.e(TAG, "Disconnection error: ${e.message}")
+        }
+    }
+
+    fun listenForMessages(
+        onMessageReceived: (String) -> Unit,
+        onFileReceived: (String, Uri) -> Unit
+    ) {
+        if (!isConnected) {
+            Log.e(TAG, "Socket not connected. Call connect() first.")
+            return
+        }
+
+        listenerJob = CoroutineScope(Dispatchers.IO).launch {
             try {
-                Log.d(TAG, "Attempting to connect to $targetIp:$targetPort (attempt $attempt/$maxRetries)")
-                
-                // Create new socket for each attempt
-                val socket = Socket()
-                socket.keepAlive = true
-                socket.tcpNoDelay = true
-                socket.soTimeout = connectionTimeoutMs
-                socket.reuseAddress = true
-                
-                // Set socket options before connect
-                socket.setPerformancePreferences(0, 1, 2) // Prioritize bandwidth and latency over connection time
-                socket.receiveBufferSize = 65536 // 64KB receive buffer
-                socket.sendBufferSize = 65536 // 64KB send buffer
+                while (coroutineContext.isActive && isConnected) {
+                    val line = reader?.readLine() ?: break
+                    Log.d(TAG, "Message received: $line")
 
-                // Try to bind to the best local address
-                val bestLocalAddress = findBestLocalAddress(targetIp)
-                if (bestLocalAddress != null) {
-                    try {
-                        socket.bind(java.net.InetSocketAddress(bestLocalAddress, 0))
-                        Log.d(TAG, "Socket bound to local address: ${bestLocalAddress.hostAddress}")
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Failed to bind to ${bestLocalAddress.hostAddress}: ${e.message}")
-                        // If binding fails, try connecting without explicit bind
-                        Log.d(TAG, "Attempting connection without explicit bind")
+                    when {
+                        line.startsWith("SERVER_FILE:") -> {
+                            val fileName = line.substringAfter("SERVER_FILE:")
+                            handleServerInitiatedTransfer(fileName, onFileReceived)
+                        }
+
+//                        0
+
+                        else -> {
+                            Log.d(TAG, "Forwarding message to handler: $line")
+                            onMessageReceived(line)
+                        }
                     }
-                } else {
-                    Log.w(TAG, "No suitable local address found, attempting connection without explicit bind")
                 }
-                
-                // Connect with timeout
-                socket.connect(java.net.InetSocketAddress(targetIp, targetPort), connectionTimeoutMs)
-                
-                // Verify connection
-                if (!socket.isConnected || socket.isClosed) {
-                    throw java.net.SocketException("Socket not connected after creation")
-                }
-                
-                // Log connection details
-                val connectedLocalAddress = socket.localAddress.hostAddress
-                val connectedLocalPort = socket.localPort
-                Log.d(TAG, "Successfully connected from $connectedLocalAddress:$connectedLocalPort to $targetIp:$targetPort")
-                
-                currentSocket = socket
-                return@withContext socket
             } catch (e: Exception) {
-                lastException = e
-                Log.e(TAG, "Connection attempt $attempt failed: ${e.message}")
-                
-                if (attempt < maxRetries) {
-                    val delayMs = retryDelayMs * attempt
-                    Log.d(TAG, "Waiting ${delayMs}ms before next attempt")
-                    kotlinx.coroutines.delay(delayMs)
-                }
+                Log.e(TAG, "Listening error: ${e.message}")
             }
         }
-        throw lastException ?: IllegalStateException("Failed to connect after $maxRetries attempts")
     }
 
-    private fun findBestLocalAddress(targetIp: String): java.net.InetAddress? {
+
+    private suspend fun handleServerInitiatedTransfer(fileName: String, onFileReceived: (String, Uri) -> Unit) = withContext(Dispatchers.IO) {
         try {
-            // Get all network interfaces
-            val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
-            val targetAddress = java.net.InetAddress.getByName(targetIp)
-            
-            // First, try to find the Wi-Fi Direct interface (p2p)
-            interfaces?.toList()?.forEach { networkInterface ->
-                if (networkInterface.isUp && !networkInterface.isLoopback) {
-                    if (networkInterface.name.contains("p2p", ignoreCase = true)) {
-                        networkInterface.interfaceAddresses.forEach { interfaceAddress ->
-                            val address = interfaceAddress.address
-                            if (address is java.net.Inet4Address) {
-                                Log.d(TAG, "Found p2p interface ${networkInterface.name}: ${address.hostAddress}")
-                                return address
-                            }
-                        }
-                    }
-                }
-            }
-            
-            // Then try to find a matching subnet
-            interfaces?.toList()?.forEach { networkInterface ->
-                if (networkInterface.isUp && !networkInterface.isLoopback) {
-                    networkInterface.interfaceAddresses.forEach { interfaceAddress ->
-                        val address = interfaceAddress.address
-                        if (address is java.net.Inet4Address) {
-                            // Check if the target IP is in the same subnet
-                            if (isInSameSubnet(targetAddress, address, interfaceAddress.networkPrefixLength)) {
-                                Log.d(TAG, "Found matching subnet interface ${networkInterface.name}: ${address.hostAddress}")
-                                return address
-                            }
-                        }
-                    }
-                }
-            }
-            
-            // If still not found, try any interface in the 192.168.49.x range
-            interfaces?.toList()?.forEach { networkInterface ->
-                if (networkInterface.isUp && !networkInterface.isLoopback) {
-                    networkInterface.interfaceAddresses.forEach { interfaceAddress ->
-                        val address = interfaceAddress.address
-                        if (address is java.net.Inet4Address) {
-                            address.hostAddress?.let { hostAddress ->
-                                if (hostAddress.startsWith("192.168.49.")) {
-                                    Log.d(TAG, "Found 192.168.49.x interface ${networkInterface.name}: $hostAddress")
-                                    return address
-                                }
-                            }
-                        }
-                    }
+            val input = DataInputStream(BufferedInputStream(socket!!.getInputStream()))
+            val actualFileName = input.readUTF()
+            val fileSize = input.readLong()
+
+            val tempFile = File.createTempFile("server_file_", "_$actualFileName")
+            FileOutputStream(tempFile).use { output ->
+                val buffer = ByteArray(8192)
+                var total = 0L
+                while (total < fileSize) {
+                    val read = input.read(buffer, 0, minOf(buffer.size, (fileSize - total).toInt()))
+                    if (read == -1) break
+                    output.write(buffer, 0, read)
+                    total += read
                 }
             }
 
-            // As a last resort, try any non-loopback IPv4 interface
-            interfaces?.toList()?.forEach { networkInterface ->
-                if (networkInterface.isUp && !networkInterface.isLoopback) {
-                    networkInterface.interfaceAddresses.forEach { interfaceAddress ->
-                        val address = interfaceAddress.address
-                        if (address is java.net.Inet4Address) {
-                            Log.d(TAG, "Found fallback interface ${networkInterface.name}: ${address.hostAddress}")
-                            return address
-                        }
-                    }
-                }
-            }
-            
-            Log.e(TAG, "No suitable local address found. Available interfaces:")
-            interfaces?.toList()?.forEach { networkInterface ->
-                Log.d(TAG, "Interface ${networkInterface.name} (up=${networkInterface.isUp}, loopback=${networkInterface.isLoopback}):")
-                networkInterface.interfaceAddresses.forEach { interfaceAddress ->
-                    Log.d(TAG, "  Address: ${interfaceAddress.address.hostAddress}")
-                }
-            }
-            return null
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", tempFile)
+            onFileReceived(actualFileName, uri)
+            Log.d(TAG, "Server-initiated transfer complete: $actualFileName")
         } catch (e: Exception) {
-            Log.e(TAG, "Error finding local address: ${e.message}")
-            return null
-        }
-    }
-
-    private fun isInSameSubnet(addr1: java.net.InetAddress, addr2: java.net.InetAddress, prefixLength: Short): Boolean {
-        val mask = -1L shl (32 - prefixLength)
-        val addr1Bits = addr1.address.fold(0L) { acc, byte -> (acc shl 8) or (byte.toLong() and 0xFF) }
-        val addr2Bits = addr2.address.fold(0L) { acc, byte -> (acc shl 8) or (byte.toLong() and 0xFF) }
-        return (addr1Bits and mask) == (addr2Bits and mask)
-    }
-
-    private fun closeCurrentSocket() {
-        try {
-            currentSocket?.let { socket ->
-                if (!socket.isClosed) {
-                    try {
-                        socket.shutdownInput()
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error shutting down input: ${e.message}")
-                    }
-                    try {
-                        socket.shutdownOutput()
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error shutting down output: ${e.message}")
-                    }
-                    socket.close()
-                    Log.d(TAG, "Closed existing socket connection")
-                }
-            }
-            currentSocket = null
-        } catch (e: Exception) {
-            Log.e(TAG, "Error closing socket: ${e.message}")
+            Log.e(TAG, "Error during server-initiated transfer: ${e.message}")
         }
     }
 
     suspend fun requestFileList(): List<String> = withContext(Dispatchers.IO) {
-        var socket: Socket? = null
+        if (!isConnected) throw IOException("Not connected")
+        
         try {
-            socket = createSocket()
-            val writer = PrintWriter(socket.getOutputStream(), true)
-            val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
-
-            writer.println("GET_FILE_LIST")
-            Log.d(TAG, "Sent GET_FILE_LIST command")
-
-            val response = withTimeout(connectionTimeoutMs.toLong()) {
-                reader.readLine()
+            writer?.println("GET_FILE_LIST")
+            val response = reader?.readLine()
+            if (response == null) {
+                Log.w(TAG, "No response from server for file list request")
+                emptyList<String>()
+            } else {
+                Log.d(TAG, "Received response from server: $response")
+                
+                // Try to parse the response as JSON array
+                try {
+                    Log.d("Response from Server: ", response)
+                    gson.fromJson(response, object : TypeToken<List<String>>() {}.type)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to parse JSON response: $response, error: ${e.message}")
+                    // If JSON parsing fails, try to handle as empty response
+                    if (response.trim().isEmpty() || response == "[]") {
+                        emptyList<String>()
+                    } else {
+                        throw IOException("Invalid response format from server: $response")
+                    }
+                }
             }
-            Log.d(TAG, "Received response: $response")
-            
-            val type = object : TypeToken<List<String>>() {}.type
-            val fileList = gson.fromJson<List<String>>(response, type)
-            fileList ?: emptyList()
         } catch (e: Exception) {
             Log.e(TAG, "Error requesting file list: ${e.message}")
-            throw e
-        } finally {
-            try {
-                socket?.close()
-            } catch (e: Exception) {
-                Log.e(TAG, "Error closing socket after file list request: ${e.message}")
-            }
+            throw IOException("Failed to get file list: ${e.message}")
         }
     }
 
     suspend fun requestFile(fileName: String, destinationUri: Uri): Boolean = withContext(Dispatchers.IO) {
-        var socket: Socket? = null
-        try {
-            socket = createSocket()
-            val writer = PrintWriter(socket.getOutputStream(), true)
-            val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
-
-            writer.println("GET_FILE:$fileName")
-            Log.d(TAG, "Sent GET_FILE command for: $fileName")
-
-            val status = withTimeout(connectionTimeoutMs.toLong()) {
-                reader.readLine()
+        if (!isConnected) throw IOException("Not connected")
+        writer?.println("GET_FILE:$fileName")
+        if (reader?.readLine() != "OK") return@withContext false
+        val input = DataInputStream(socket!!.getInputStream())
+        val receivedFileName = input.readUTF()
+        val fileSize = input.readLong()
+        context.contentResolver.openOutputStream(destinationUri)?.use { outputStream ->
+            val buffer = ByteArray(8192)
+            var totalRead = 0L
+            while (totalRead < fileSize) {
+                val read = input.read(buffer)
+                if (read == -1) break
+                outputStream.write(buffer, 0, read)
+                totalRead += read
             }
-            if (status != "OK") {
-                Log.e(TAG, "Error response from server: $status")
-                return@withContext false
-            }
-
-            val input = DataInputStream(socket.getInputStream())
-            val receivedFileName = input.readUTF()
-            val fileSize = input.readLong()
-            Log.d(TAG, "Receiving file: $receivedFileName (size: $fileSize bytes)")
-
-            context.contentResolver.openOutputStream(destinationUri)?.use { outputStream ->
-                val buffer = ByteArray(8192)
-                var totalRead = 0L
-                var lastProgressUpdate = System.currentTimeMillis()
-
-                while (totalRead < fileSize) {
-                    val remaining = fileSize - totalRead
-                    val read = input.read(buffer, 0, minOf(buffer.size, remaining.toInt()))
-                    if (read == -1) break
-                    outputStream.write(buffer, 0, read)
-                    totalRead += read
-
-                    // Log progress every second
-                    val now = System.currentTimeMillis()
-                    if (now - lastProgressUpdate >= 1000) {
-                        val progress = (totalRead * 100.0 / fileSize).toInt()
-                        Log.d(TAG, "Download progress: $progress% ($totalRead/$fileSize bytes)")
-                        lastProgressUpdate = now
-                    }
-                }
-                outputStream.flush()
-                Log.d(TAG, "File download completed: $totalRead bytes transferred")
-                return@withContext totalRead == fileSize
-            }
-            false
-        } catch (e: Exception) {
-            Log.e(TAG, "Error requesting file: ${e.message}")
-            false
-        } finally {
-            try {
-                socket?.close()
-            } catch (e: Exception) {
-                Log.e(TAG, "Error closing socket after file request: ${e.message}")
-            }
-        }
+            outputStream.flush()
+            return@withContext totalRead == fileSize
+        } ?: false
     }
 
     suspend fun sendFile(fileUri: Uri): Boolean = withContext(Dispatchers.IO) {
-        var socket: Socket? = null
-        try {
-            socket = createSocket()
-            val writer = PrintWriter(socket.getOutputStream(), true)
-            val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
-            
-            val fileDescriptor = context.contentResolver.openFileDescriptor(fileUri, "r") 
-                ?: throw IOException("Failed to open file descriptor for URI: $fileUri")
-            
-            val fileName = getFileName(context, fileUri)
-            val fileSize = fileDescriptor.statSize
-            Log.d(TAG, "Preparing to send file: $fileName (size: $fileSize bytes)")
-
-            writer.println("UPLOAD_FILE")
-            Log.d(TAG, "Sent UPLOAD_FILE command, waiting for server ready response")
-
-            val response = withTimeout(connectionTimeoutMs.toLong()) {
-                reader.readLine()
-            }
-            Log.d(TAG, "Received server response: $response")
-            if (response != "READY") {
-                throw IOException("Server not ready: $response")
-            }
-
-            val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream()))
-            val inputStream = FileInputStream(fileDescriptor.fileDescriptor)
-
-            try {
-                output.writeUTF(fileName)
-                output.writeLong(fileSize)
-                output.flush()
-                Log.d(TAG, "Sent file metadata")
-
-                val buffer = ByteArray(8192)
-                var read: Int
-                var totalSent = 0L
-                val startTime = System.currentTimeMillis()
-                var lastProgressUpdate = startTime
-
-                while (inputStream.read(buffer).also { read = it } != -1) {
-                    output.write(buffer, 0, read)
-                    totalSent += read
-                    
-                    // Log progress every second
-                    val currentTime = System.currentTimeMillis()
-                    if (currentTime - lastProgressUpdate >= 1000) {
-                        val progress = (totalSent * 100.0 / fileSize).toInt()
-                        val speed = totalSent * 1000.0 / (currentTime - startTime) / 1024 // KB/s
-                        Log.d(TAG, "Upload progress: $progress% ($totalSent/$fileSize bytes), Speed: %.2f KB/s".format(speed))
-                        lastProgressUpdate = currentTime
-                    }
-                }
-
-                output.flush()
-                Log.d(TAG, "File data sent, waiting for completion confirmation")
-
-                val completionStatus = withTimeout(connectionTimeoutMs.toLong()) {
-                    reader.readLine()
-                }
-                Log.d(TAG, "Received completion status: $completionStatus")
-                return@withContext completionStatus == "SUCCESS"
-            } finally {
-                inputStream.close()
-                fileDescriptor.close()
-                output.flush()
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Upload error: ${e.message}", e)
-            return@withContext false
-        } finally {
-            try {
-                socket?.close()
-            } catch (e: Exception) {
-                Log.e(TAG, "Error closing socket after file upload: ${e.message}")
-            }
+        if (!isConnected) throw IOException("Not connected")
+        val fileDescriptor = context.contentResolver.openFileDescriptor(fileUri, "r") ?: return@withContext false
+        val fileName = getFileName(context, fileUri)
+        val fileSize = fileDescriptor.statSize
+        writer?.println("UPLOAD_FILE")
+        if (reader?.readLine() != "READY") return@withContext false
+        val output = DataOutputStream(BufferedOutputStream(socket!!.getOutputStream()))
+        val inputStream = FileInputStream(fileDescriptor.fileDescriptor)
+        output.writeUTF(fileName)
+        output.writeLong(fileSize)
+        val buffer = ByteArray(8192)
+        var read: Int
+        while (inputStream.read(buffer).also { read = it } != -1) {
+            output.write(buffer, 0, read)
         }
+        output.flush()
+        val result = reader?.readLine()
+        inputStream.close()
+        fileDescriptor.close()
+        return@withContext result == "SUCCESS"
     }
 
     private fun getFileName(context: Context, uri: Uri): String {
@@ -387,136 +228,28 @@ class FileTransferClient(
         } ?: "file.bin"
     }
 
-    fun startListening(onFileReceived: (String, Uri) -> Unit) {
-        if (isListening) {
-            Log.d(TAG, "Already listening for server-initiated transfers")
-            return
-        }
-
-        listenerJob = CoroutineScope(Dispatchers.IO).launch {
-            try {
-                val socket = createSocket()
-                currentSocket = socket
-                isListening = true
-
-                val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
-                val writer = PrintWriter(socket.getOutputStream(), true)
-
-                // Send a special command to indicate this client is ready for server-initiated transfers
-                writer.println("READY_FOR_SERVER_TRANSFERS")
-                Log.d(TAG, "Sent READY_FOR_SERVER_TRANSFERS command")
-
-                // Wait for server acknowledgment
-                val response = reader.readLine()
-                if (response != "OK") {
-                    Log.e(TAG, "Server did not acknowledge transfer readiness: $response")
-                    return@launch
-                }
-                Log.d(TAG, "Server acknowledged transfer readiness")
-
-                while (isListening) {
-                    try {
-                        val command = reader.readLine()
-                        if (command == null) {
-                            Log.d(TAG, "Connection closed by server")
-                            break
-                        }
-
-                        when {
-                            command.startsWith("SERVER_FILE:") -> {
-                                val fileName = command.substringAfter("SERVER_FILE:")
-                                handleServerInitiatedTransfer(socket, fileName, onFileReceived)
-                            }
-                            else -> {
-                                Log.d(TAG, "Received unknown command: $command")
-                            }
-                        }
-                    } catch (e: Exception) {
-                        if (isListening) {
-                            Log.e(TAG, "Error reading from server: ${e.message}")
-                            break
+    private fun findBestLocalAddress(targetIp: String): InetAddress? {
+        return try {
+            val interfaces = NetworkInterface.getNetworkInterfaces().toList()
+            for (intf in interfaces) {
+                if (intf.isUp && !intf.isLoopback && intf.name.contains("p2p", ignoreCase = true)) {
+                    for (addr in intf.inetAddresses.toList()) {
+                        if (!addr.isLoopbackAddress && addr is Inet4Address) {
+                            Log.d(TAG, "Found P2P interface ${intf.name} with address ${addr.hostAddress}")
+                            return addr
                         }
                     }
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error in server transfer listener: ${e.message}")
-            } finally {
-                isListening = false
-                closeCurrentSocket()
             }
+            null
+        } catch (e: Exception) {
+            Log.e(TAG, "Error finding local P2P address: ${e.message}")
+            null
         }
     }
 
-    private suspend fun handleServerInitiatedTransfer(
-        socket: Socket,
-        fileName: String,
-        onFileReceived: (String, Uri) -> Unit
-    ) {
-        withContext(Dispatchers.IO) {
-            try {
-                val input = DataInputStream(BufferedInputStream(socket.getInputStream()))
-                val receivedFileName = input.readUTF()
-                val fileSize = input.readLong()
-                Log.d(TAG, "Receiving server-initiated file: $receivedFileName (size: $fileSize bytes)")
-
-                // Create a temporary file to store the received data
-                val tempFile = File.createTempFile("server_transfer_", "_$receivedFileName")
-                val outputStream = FileOutputStream(tempFile)
-
-                try {
-                    val buffer = ByteArray(8192)
-                    var totalRead = 0L
-                    var lastProgressUpdate = System.currentTimeMillis()
-
-                    while (totalRead < fileSize) {
-                        val remaining = fileSize - totalRead
-                        val read = input.read(buffer, 0, minOf(buffer.size, remaining.toInt()))
-                        if (read == -1) break
-                        outputStream.write(buffer, 0, read)
-                        totalRead += read
-
-                        val now = System.currentTimeMillis()
-                        if (now - lastProgressUpdate >= 1000) {
-                            val progress = (totalRead * 100.0 / fileSize).toInt()
-                            Log.d(TAG, "Server transfer progress: $progress% ($totalRead/$fileSize bytes)")
-                            lastProgressUpdate = now
-                        }
-                    }
-
-                    outputStream.flush()
-
-                    if (totalRead == fileSize) {
-                        // Convert the temporary file to a content URI
-                        val contentUri = FileProvider.getUriForFile(
-                            context,
-                            "${context.packageName}.fileprovider",
-                            tempFile
-                        )
-                        onFileReceived(receivedFileName, contentUri)
-                        Log.d(TAG, "Server-initiated file transfer completed: $receivedFileName")
-                    } else {
-                        Log.e(TAG, "Server transfer incomplete: $totalRead/$fileSize bytes")
-                        tempFile.delete()
-                    }
-                } finally {
-                    outputStream.close()
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error handling server-initiated transfer: ${e.message}")
-                throw e
-            }
-        }
+    fun isConnected(): Boolean {
+        return isConnected && socket != null && !socket!!.isClosed
     }
 
-    fun stopListening() {
-        isListening = false
-        listenerJob?.cancel()
-        listenerJob = null
-        closeCurrentSocket()
-    }
-
-    fun cleanup() {
-        stopListening()
-        closeCurrentSocket()
-    }
 }

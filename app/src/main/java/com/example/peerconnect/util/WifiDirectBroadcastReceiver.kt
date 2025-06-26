@@ -7,15 +7,16 @@ import android.net.wifi.p2p.WifiP2pDevice
 import android.net.wifi.p2p.WifiP2pManager
 import android.os.Build
 import android.util.Log
-import com.example.peerconnect.ui.screens.PeerDiscoveryViewModel
 
 class WifiDirectBroadcastReceiver(
     private val manager: WifiP2pManager,
     private val channel: WifiP2pManager.Channel,
+    private val context: Context,
     private val peerListener: WifiP2pManager.PeerListListener,
     private val connectionInfoListener: WifiP2pManager.ConnectionInfoListener,
-    private val viewModel: PeerDiscoveryViewModel
 ) : BroadcastReceiver() {
+
+    private val connectionManager = ConnectionManager(context, manager, channel)
 
     override fun onReceive(context: Context, intent: Intent) {
         try {
@@ -28,7 +29,7 @@ class WifiDirectBroadcastReceiver(
                         manager.requestPeers(channel, peerListener)
                     } else {
                         Log.d(TAG, "Wi-Fi P2P is disabled")
-                        viewModel.disconnect()
+                        connectionManager.disconnect()
                     }
                 }
                 
@@ -46,7 +47,7 @@ class WifiDirectBroadcastReceiver(
                         
                         if (isConnected) {
                             // Connection established
-                            Log.d(TAG, "Group formed. Owner: ${group!!.owner.deviceAddress}, Clients: ${group.clientList.joinToString { it.deviceAddress }}")
+                            Log.d(TAG, "Group formed. Owner: ${group.owner.deviceAddress}, Clients: ${group.clientList.joinToString { it.deviceAddress }}")
                             manager.requestConnectionInfo(channel) { info ->
                                 if (info != null && info.groupFormed) {
                                     Log.d(TAG, "Connected to P2P network. Group owner: ${info.isGroupOwner}, Address: ${info.groupOwnerAddress?.hostAddress}")
@@ -56,7 +57,7 @@ class WifiDirectBroadcastReceiver(
                         } else {
                             // Connection lost or disconnected
                             Log.d(TAG, "P2P connection lost or disconnected")
-                            viewModel.disconnect()
+                            connectionManager.disconnect()
                         }
                     }
                     // Always request peers to update states
@@ -74,9 +75,9 @@ class WifiDirectBroadcastReceiver(
                     Log.d(TAG, "This device changed. Status: ${getDeviceStatus(device?.status ?: -1)}")
                     
                     // If this device's status indicates disconnection, ensure peer is also disconnected
-                    if (device?.status == WifiP2pDevice.AVAILABLE && viewModel.connectionState.isConnected) {
-                        viewModel.disconnect()
-                    }
+//                    if (device?.status == WifiP2pDevice.AVAILABLE && viewModel.connectionState.isConnected) {
+//                        connectionManager.disconnect()
+//                    } //TODO
                     
                     // Request peers update to refresh all device states
                     manager.requestPeers(channel, peerListener)

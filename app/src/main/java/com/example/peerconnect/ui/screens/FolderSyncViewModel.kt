@@ -1,3 +1,5 @@
+//FolderSyncViewModel
+
 package com.example.peerconnect.ui.screens
 
 import android.app.Application
@@ -20,9 +22,13 @@ import com.example.peerconnect.util.SharedFolder
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.flow.launchIn
-import kotlinx.coroutines.flow.onEach
 import androidx.documentfile.provider.DocumentFile
+import androidx.core.net.toUri
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
+import java.io.File
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.TimeoutCancellationException
 
 class FolderSyncViewModel(
     application: Application,
@@ -34,13 +40,25 @@ class FolderSyncViewModel(
     var remoteFiles by mutableStateOf<List<String>>(emptyList())
         private set
 
+    var clientSharedFiles by mutableStateOf<List<String>>(emptyList())
+        private set
+
     var isLoading by mutableStateOf(false)
+        private set
+
+    var isRefreshingFileLists by mutableStateOf(false)
+        private set
+
+    var localFileCount by mutableStateOf(0)
         private set
 
     var errorMessage by mutableStateOf<String?>(null)
         private set
 
     var isConnected by mutableStateOf(false)
+        private set
+
+    var isGroupOwner by mutableStateOf(false)
         private set
 
     private var sharedFolder: SharedFolder? = null
@@ -60,38 +78,38 @@ class FolderSyncViewModel(
                 val prefs = context.getSharedPreferences("folder_prefs", Context.MODE_PRIVATE)
                 val treeUriString = prefs.getString("tree_uri", null)
                 val rootUriString = prefs.getString("root_uri", null)
-                
+
                 if (treeUriString != null && rootUriString != null) {
-                    val treeUri = Uri.parse(treeUriString)
-                    val rootUri = Uri.parse(rootUriString)
-                    
+                    val treeUri = treeUriString.toUri()
+                    val rootUri = rootUriString.toUri()
+
                     // Check if we still have permissions for both URIs
                     val hasTreePermission = context.contentResolver.persistedUriPermissions.any {
                         it.uri == treeUri && it.isReadPermission && it.isWritePermission
                     }
-                    
+
                     val hasRootPermission = context.contentResolver.persistedUriPermissions.any {
                         it.uri == rootUri && it.isReadPermission && it.isWritePermission
                     }
-                    
+
                     if (hasTreePermission && hasRootPermission) {
                         Log.d(TAG, "Restoring saved folder with valid permissions")
-                        setLocalFolder(rootUri)
+                        setLocalFolderInternal(rootUri, false) // Don't start server during init
                     } else {
                         Log.d(TAG, "Lost permissions for saved folder, creating temporary folder")
                         val tempUri = createTempFolder(context)
-                        setLocalFolder(tempUri)
+                        setLocalFolderInternal(tempUri, false) // Don't start server during init
                     }
                 } else {
                     Log.d(TAG, "No saved folder found, creating temporary folder")
                     val tempUri = createTempFolder(context)
-                    setLocalFolder(tempUri)
+                    setLocalFolderInternal(tempUri, false) // Don't start server during init
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to restore folder: ${e.message}")
                 // Create a temporary folder as fallback
                 val tempUri = createTempFolder(context)
-                setLocalFolder(tempUri)
+                setLocalFolderInternal(tempUri, false) // Don't start server during init
             }
         }
     }
@@ -99,18 +117,35 @@ class FolderSyncViewModel(
     private fun startConnectionMonitoring() {
         connectionMonitorJob?.cancel()
         connectionMonitorJob = viewModelScope.launch {
+            // Wait a bit before starting monitoring to allow initial connection setup
+            delay(5000)
+
             while (true) {
                 try {
                     if (isConnected) {
                         Log.d(TAG, "Checking connection status...")
-                        val files = fileTransferClient?.requestFileList()
-                        if (files == null) {
-                            Log.e(TAG, "Connection check failed - no files received")
+                        // Use a timeout for the connection check
+                        val connectionCheckResult = try {
+                            withTimeout(5000) {
+                                if (isGroupOwner) {
+                                    // For Group Owner, check if client is still connected
+                                    fileTransferServer?.hasConnectedClient() ?: false
+                                } else {
+                                    // For Client, try to get file list from server
+                                    val files = fileTransferClient?.requestFileList()
+                                    files != null
+                                }
+                            }
+                        } catch (e: TimeoutCancellationException) {
+                            Log.w(TAG, "Connection check timed out, but connection may still be alive")
+                            true // Assume connection is still alive if timeout
+                        }
+
+                        if (!connectionCheckResult) {
+                            Log.w(TAG, "Connection lost, updating status")
                             isConnected = false
                             errorMessage = "Connection lost"
                             break
-                        } else {
-                            Log.d(TAG, "Connection check successful - ${files.size} files available")
                         }
                     }
                 } catch (e: Exception) {
@@ -119,29 +154,114 @@ class FolderSyncViewModel(
                     errorMessage = "Connection lost: ${e.message}"
                     break
                 }
-                delay(5000) // Check every 5 seconds
+                delay(15000) // Check every 15 seconds instead of 10
             }
         }
     }
 
     private fun createTempFolder(context: Context): Uri {
         val tempDir = context.getExternalFilesDir(null)
-        val tempFolder = java.io.File(tempDir, "temp_shared_folder").apply {
+        val tempFolder = File(tempDir, "temp_shared_folder").apply {
             mkdirs()
         }
         return Uri.fromFile(tempFolder)
     }
 
     fun setLocalFolder(uri: Uri) {
+        setLocalFolderInternal(uri, true) // Start server if appropriate
+    }
+
+    private fun setLocalFolderInternal(uri: Uri, shouldStartServer: Boolean) {
+        Log.d(TAG, "Setting local folder: $uri")
         localFolderUri = uri
-        
+
         // Stop any existing server first
         fileTransferServer?.stopServer()
         isServerRunning = false
-        
-        // Create new shared folder and server
-        sharedFolder = SharedFolder(context, uri).also { folder ->
-            startServer(folder)
+
+        // Create new shared folder
+        sharedFolder = SharedFolder(context, uri)
+        Log.d(TAG, "Created SharedFolder with URI: $uri")
+
+        // Update local file count
+        updateLocalFileCount()
+
+        // Only start server if this device is a Group Owner and should start server
+        if (isGroupOwner && shouldStartServer) {
+            Log.d(TAG, "Starting server as Group Owner")
+            startServer(sharedFolder!!)
+            isConnected = true
+        } else if (!isGroupOwner) {
+            Log.d(TAG, "Client device - not starting server, only setting local folder")
+        } else {
+            Log.d(TAG, "Group Owner device - server will be started when connection is established")
+        }
+
+        // Exchange file lists after folder is set (only if connected)
+        if (isConnected) {
+            Log.d(TAG, "Folder changed while connected, exchanging updated file lists")
+            exchangeFileLists()
+        }
+    }
+
+    private fun isClientReady(): Boolean {
+        return fileTransferClient?.isConnected() == true && isConnected
+    }
+
+    private fun exchangeFileLists() {
+        viewModelScope.launch {
+            try {
+                isRefreshingFileLists = true
+
+                // Wait a bit for connection to be established
+                delay(2000)
+
+                if (isGroupOwner) {
+                    // Group Owner: Use server's requestClientFileList method
+                    Log.d(TAG, "Group Owner exchanging file lists with client")
+
+                    // Get fresh local files from current folder
+                    val localFiles = sharedFolder?.listFiles()?.map { it.name } ?: emptyList()
+                    Log.d(TAG, "Group Owner has ${localFiles.size} files in current folder: $localFiles")
+
+                    // Use server's method to request client's file list
+                    fileTransferServer?.requestClientFileList { clientFiles ->
+                        Log.d(TAG, "Received client file list: $clientFiles")
+                        clientSharedFiles = clientFiles
+                    }
+
+                } else {
+                    // Client: Use client's requestFileList method
+                    Log.d(TAG, "Client exchanging file lists with Group Owner")
+
+                    // Get fresh local files from current folder
+                    val localFiles = sharedFolder?.listFiles()?.map { it.name } ?: emptyList()
+                    Log.d(TAG, "Client has ${localFiles.size} files in current folder: $localFiles")
+
+                    // Use client's method to get server's file list
+                    fileTransferClient?.let { client ->
+                        try {
+                            Log.d(TAG, "Requesting file list from server...")
+                            val serverFiles = client.requestFileList()
+                            Log.d(TAG, "Received server file list: $serverFiles")
+                            remoteFiles = serverFiles
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Failed to get server file list: ${e.message}")
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error exchanging file lists: ${e.message}")
+            } finally {
+                isRefreshingFileLists = false
+            }
+        }
+    }
+
+    private fun startServerIfGroupOwner() {
+        if (isGroupOwner && sharedFolder != null && !isServerRunning) {
+            Log.d(TAG, "Starting server for Group Owner role")
+            startServer(sharedFolder!!)
         }
     }
 
@@ -153,8 +273,8 @@ class FolderSyncViewModel(
         }
 
         try {
-            fileTransferServer?.stopServer()
-            
+//            fileTransferServer?.stopServer()
+
             fileTransferServer = FileTransferServer(
                 context = context,
                 sharedFolder = folder,
@@ -178,59 +298,117 @@ class FolderSyncViewModel(
         }
     }
 
-    fun setRemotePeer(ipAddress: String) {
-        Log.d(TAG, "Connecting to peer at $ipAddress")
-        
-        // Ensure server is running before connecting
-        if (!isServerRunning) {
-            Log.d(TAG, "Starting server before connecting to peer")
-            val tempUri = createTempFolder(context)
-            setLocalFolder(tempUri)
+    fun setRemotePeer(deviceAddress: String, isGroupOwner: Boolean) {
+        this.isGroupOwner = isGroupOwner
+        Log.d(TAG, "Setting remote peer: $deviceAddress, isGroupOwner: $isGroupOwner")
+
+        // Stop any existing connections
+        fileTransferClient?.disconnect()
+//        fileTransferServer?.stopServer()
+        isServerRunning = false
+        isConnected = false
+
+        if (isGroupOwner) {
+            // This device is the Group Owner - start server
+            Log.d(TAG, "Starting server as Group Owner")
+            sharedFolder?.let { startServer(it) }
+        } else {
+            // This device is the client - connect to Group Owner
+            Log.d(TAG, "Connecting to Group Owner as client")
+            startClient(deviceAddress)
         }
 
-        // Cancel any existing client
-        fileTransferClient?.cleanup()
+        // Start connection monitoring
+        startConnectionMonitoring()
 
+        // Exchange file lists after connection is established
+        viewModelScope.launch {
+            delay(3000) // Wait for connection to be established
+            exchangeFileLists()
+        }
+    }
+
+    private fun startClient(deviceAddress: String) {
         viewModelScope.launch {
             try {
-                // Add delay to ensure server is fully started
-                delay(2000)
-                
                 // Validate IP address format
-                if (!ipAddress.matches(Regex("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$"))) {
+                if (!deviceAddress.matches(Regex("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$"))) {
                     throw IllegalArgumentException("Invalid IP address format")
+                }
+
+                // Ensure we have a shared folder
+                if (sharedFolder == null) {
+                    val tempUri = createTempFolder(context)
+                    setLocalFolder(tempUri)
                 }
 
                 fileTransferClient = FileTransferClient(
                     context = context,
-                    targetIp = ipAddress,
-                    connectionTimeoutMs = 15000, // 15 seconds timeout
-                    maxRetries = 5,
-                    retryDelayMs = 2000 // 2 seconds between retries
+                    sharedFolder = sharedFolder,
+                    targetIp = deviceAddress
                 )
-                
+
+                // Connect to the group owner's server
+                Log.d(TAG, "Establishing connection to Group Owner's server...")
+                var connected = false
+                var retryCount = 0
+                val maxRetries = 3
+
+                while (!connected && retryCount < maxRetries) {
+                    try {
+                        connected = fileTransferClient?.connect() ?: false
+                        if (!connected) {
+                            retryCount++
+                            if (retryCount < maxRetries) {
+                                Log.d(TAG, "Connection attempt $retryCount failed, retrying in 1 second...")
+                                delay(1000)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        retryCount++
+                        Log.e(TAG, "Connection attempt $retryCount failed: ${e.message}")
+                        if (retryCount < maxRetries) {
+                            delay(1000)
+                        }
+                    }
+                }
+
+                if (!connected) {
+                    throw IllegalStateException("Failed to establish connection to Group Owner after $maxRetries attempts")
+                }
+
                 // Test connection by requesting file list
-                Log.d(TAG, "Testing connection to peer...")
-                val files = fileTransferClient?.requestFileList()
-                if (files != null) {
-                    remoteFiles = files
+                Log.d(TAG, "Testing connection to Group Owner's server...")
+                val serverFiles = fileTransferClient?.requestFileList()
+                if (serverFiles != null) {
+                    remoteFiles = serverFiles
                     isConnected = true
                     errorMessage = null
-                    Log.d(TAG, "Successfully connected to peer - ${files.size} files available")
-                    startConnectionMonitoring()
-                    
+                    Log.d(TAG, "Successfully connected to Group Owner - ${serverFiles.size} files available")
+
                     // Start listening for server-initiated transfers
-                    fileTransferClient?.startListening { fileName, uri ->
-                        handleServerInitiatedTransfer(fileName, uri)
-                    }
+                    Log.d(TAG, "Starting message listener for server communications")
+                    fileTransferClient?.listenForMessages(
+                        onMessageReceived = { message ->
+                            Log.d(TAG, "Received message from server: $message")
+                        },
+                        onFileReceived = { fileName, uri ->
+                            Log.d(TAG, "Received file from server: $fileName")
+                            handleServerInitiatedTransfer(fileName, uri)
+                        }
+                    )
+
+                    // Wait a bit for message listener to be ready
+                    delay(500)
+                    Log.d(TAG, "Client is now ready for file list exchange")
                 } else {
-                    throw IllegalStateException("Failed to get file list from peer")
+                    throw IllegalStateException("Failed to get file list from Group Owner")
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to connect to peer: ${e.message}")
-                errorMessage = "Failed to connect to peer: ${e.message}"
+                Log.e(TAG, "Failed to connect to Group Owner: ${e.message}")
+                errorMessage = "Failed to connect to Group Owner: ${e.message}"
                 isConnected = false
-                fileTransferClient?.cleanup()
+                fileTransferClient?.disconnect()
                 fileTransferClient = null
             }
         }
@@ -240,7 +418,7 @@ class FolderSyncViewModel(
         viewModelScope.launch {
             try {
                 val folder = sharedFolder ?: throw IllegalStateException("No local folder selected")
-                
+
                 // Create a new file in the selected folder
                 val docId = DocumentsContract.getTreeDocumentId(folder.folderUri)
                 val docUri = DocumentsContract.buildDocumentUriUsingTree(folder.folderUri, docId)
@@ -273,43 +451,59 @@ class FolderSyncViewModel(
             errorMessage = null
             try {
                 val localFolder = sharedFolder ?: throw IllegalStateException("No local folder selected")
-                val client = fileTransferClient ?: throw IllegalStateException("No remote peer connected")
 
-                // Get local and remote files
-                val localFiles = localFolder.listFiles(includeNested = true)
-                val remoteFileList = client.requestFileList()
+                if (isGroupOwner) {
+                    // Group Owner: Can initiate transfers to connected client
+                    Log.d(TAG, "Group Owner initiating folder sync")
+                    val localFiles = localFolder.listFiles()
 
-                // Find files to download (files in remote but not in local)
-                val localFileNames = localFiles.map { it.name }.toSet()
-                val filesToDownload = remoteFileList.filter { it !in localFileNames }
+                    // Request client's file list
+                    fileTransferServer?.requestClientFileList { clientFiles ->
+                        Log.d(TAG, "Client has ${clientFiles.size} files")
 
-                // Find files to upload (files in local but not in remote)
-                val remoteFileNames = remoteFileList.toSet()
-                val filesToUpload = localFiles.filter { it.name !in remoteFileNames }
+                        // Find files to send to client (files in local but not in client)
+                        val clientFileNames = clientFiles.toSet()
+                        val filesToSend = localFiles.filter { it.name !in clientFileNames }
 
-                // Download missing files
-                filesToDownload.forEach { fileName ->
-                    try {
-                        downloadFile(fileName)
-                        Log.d("FolderSyncViewModel", "Downloaded file: $fileName")
-                    } catch (e: Exception) {
-                        Log.e("FolderSyncViewModel", "Failed to download $fileName: ${e.message}")
+                        // Send missing files to client
+                        filesToSend.forEach { file ->
+                            try {
+//                                fileTransferServer?.initiateFileTransfer(file.name)
+                                Log.d(TAG, "Sent file to client: ${file.name}")
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Failed to send ${file.name} to client: ${e.message}")
+                            }
+                        }
+
+                        Log.d(TAG, "Group Owner sync completed. Sent: ${filesToSend.size} files")
                     }
-                }
+                } else {
+                    // Client: Can only download from group owner
+                    Log.d(TAG, "Client performing folder sync")
+                    val client = fileTransferClient ?: throw IllegalStateException("No connection to Group Owner")
 
-                // Upload missing files
-                filesToUpload.forEach { file ->
-                    try {
-                        uploadFile(file.uri)
-                        Log.d("FolderSyncViewModel", "Uploaded file: ${file.name}")
-                    } catch (e: Exception) {
-                        Log.e("FolderSyncViewModel", "Failed to upload ${file.name}: ${e.message}")
+                    // Get local and remote files
+                    val localFiles = sharedFolder?.listFiles() ?: emptyList()
+                    val remoteFileList = client.requestFileList()
+
+                    // Find files to download (files in remote but not in local)
+                    val localFileNames = localFiles.map { it.name }.toSet()
+                    val filesToDownload = remoteFileList.filter { it !in localFileNames }
+
+                    // Download missing files
+                    filesToDownload.forEach { fileName ->
+                        try {
+                            downloadFile(fileName)
+                            Log.d(TAG, "Downloaded file: $fileName")
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Failed to download $fileName: ${e.message}")
+                        }
                     }
-                }
 
-                Log.d("FolderSyncViewModel", "Folder sync completed. Downloaded: ${filesToDownload.size}, Uploaded: ${filesToUpload.size}")
+                    Log.d(TAG, "Client sync completed. Downloaded: ${filesToDownload.size} files")
+                }
             } catch (e: Exception) {
-                Log.e("FolderSyncViewModel", "Folder sync failed: ${e.message}")
+                Log.e(TAG, "Folder sync failed: ${e.message}")
                 errorMessage = "Failed to sync folders: ${e.message}"
             } finally {
                 isLoading = false
@@ -320,16 +514,16 @@ class FolderSyncViewModel(
 
     fun refreshRemoteFiles() {
         viewModelScope.launch {
-            isLoading = true
-            errorMessage = null
             try {
-                fileTransferClient?.let { client ->
-                    remoteFiles = client.requestFileList()
+                if (isConnected && !isGroupOwner) {
+                    val files = fileTransferClient?.requestFileList()
+                    if (files != null) {
+                        remoteFiles = files
+                        Log.d(TAG, "Refreshed remote files: ${files.size} files")
+                    }
                 }
             } catch (e: Exception) {
-                errorMessage = "Failed to fetch remote files: ${e.message}"
-            } finally {
-                isLoading = false
+                Log.e(TAG, "Error refreshing remote files: ${e.message}")
             }
         }
     }
@@ -343,8 +537,8 @@ class FolderSyncViewModel(
                 val client = fileTransferClient ?: throw IllegalStateException("No remote peer connected")
 
                 // Use DocumentFile to create the new file
-                val treeUri = Uri.parse(context.getSharedPreferences("folder_prefs", Context.MODE_PRIVATE)
-                    .getString("tree_uri", null))
+                val treeUri = context.getSharedPreferences("folder_prefs", Context.MODE_PRIVATE)
+                    .getString("tree_uri", null)?.toUri()
                     ?: throw IllegalStateException("No saved tree URI")
 
                 val pickedFolder = DocumentFile.fromTreeUri(context, treeUri)
@@ -377,19 +571,21 @@ class FolderSyncViewModel(
                     throw IllegalStateException("Not connected to remote peer")
                 }
 
-                val client = fileTransferClient ?: throw IllegalStateException("No remote peer connected")
+                val client = fileTransferClient
                 Log.d(TAG, "Starting file upload to peer")
-                
+
                 // Use DocumentFile to get the file name
                 val documentFile = DocumentFile.fromSingleUri(context, uri)
                     ?: throw IllegalStateException("Failed to access file")
-                
-                val success = client.sendFile(uri)
-                if (!success) {
-                    errorMessage = "Failed to upload file"
-                    Log.e(TAG, "File upload failed")
-                } else {
-                    Log.d(TAG, "File upload completed successfully")
+
+                val success = client?.sendFile(uri)
+                success?.let {
+                    if (!it) {
+                        errorMessage = "Failed to upload file"
+                        Log.e(TAG, "File upload failed")
+                    } else {
+                        Log.d(TAG, "File upload completed successfully")
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Upload error: ${e.message}", e)
@@ -404,7 +600,7 @@ class FolderSyncViewModel(
         connectionMonitorJob?.cancel()
         serverStartRetryJob?.cancel()
         fileTransferServer?.stopServer()
-        fileTransferClient?.cleanup()
+        fileTransferClient?.disconnect()
         isServerRunning = false
         isConnected = false
         remoteFiles = emptyList()
@@ -418,9 +614,59 @@ class FolderSyncViewModel(
         connectionMonitorJob?.cancel()
         serverStartRetryJob?.cancel()
         fileTransferServer?.stopServer()
-        fileTransferClient?.cleanup()
+        fileTransferClient?.disconnect()
         isServerRunning = false
         isConnected = false
+    }
+
+    private fun createFileInSharedFolder(folderUri: Uri, fileName: String): Uri? {
+        try {
+            // Get the root document ID from the tree URI
+            val rootId = DocumentsContract.getTreeDocumentId(folderUri)
+
+            // Build the root document URI
+            val rootUri = DocumentsContract.buildDocumentUriUsingTree(folderUri, rootId)
+
+            // Create new file in the root
+            val newFileId = DocumentsContract.createDocument(
+                context.contentResolver,
+                rootUri,
+                "application/octet-stream",
+                fileName
+            )
+
+            if (newFileId == null) {
+                Log.e(TAG, "Failed to create document: $fileName")
+                return null
+            }
+
+            return newFileId
+        } catch (e: Exception) {
+            Log.e(TAG, "Error creating file in shared folder: ${e.message}")
+            return null
+        }
+    }
+
+    suspend fun getLocalFileCount(): Int {
+        return sharedFolder?.listFiles()?.size ?: 0
+    }
+
+    private fun updateLocalFileCount() {
+        viewModelScope.launch {
+            try {
+                Log.d(TAG, "Updating local file count...")
+                localFileCount = getLocalFileCount()
+                Log.d(TAG, "Updated local file count: $localFileCount")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error updating local file count: ${e.message}")
+                localFileCount = 0
+            }
+        }
+    }
+
+    fun refreshFileLists() {
+        Log.d(TAG, "Manually refreshing file lists")
+        exchangeFileLists()
     }
 
     companion object {

@@ -14,6 +14,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -51,7 +52,10 @@ fun FolderSyncScreen(
     LaunchedEffect(connectionInfo) {
         connectionInfo?.let { info ->
             if (info.groupFormed) {
-                viewModel.setRemotePeer(info.groupOwnerAddress.hostAddress ?: return@let)
+                val groupOwnerAddress = info.groupOwnerAddress?.hostAddress
+                if (groupOwnerAddress != null) {
+                    viewModel.setRemotePeer(groupOwnerAddress, info.isGroupOwner)
+                }
             }
         }
     }
@@ -109,16 +113,16 @@ fun FolderSyncScreen(
             uri?.let {
                 try {
                     // Take persistable URI permission for the tree URI only
-                    val takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION or 
+                    val takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION or
                                   Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                    
+
                     // Take permission for the tree URI
                     context.contentResolver.takePersistableUriPermission(it, takeFlags)
-                    
+
                     // Get the root document ID and build the proper URI
                     val rootId = DocumentsContract.getTreeDocumentId(it)
                     val rootUri = DocumentsContract.buildDocumentUriUsingTree(it, rootId)
-                    
+
                     // Save both URIs to SharedPreferences
                     context.getSharedPreferences("folder_prefs", Context.MODE_PRIVATE)
                         .edit()
@@ -127,10 +131,10 @@ fun FolderSyncScreen(
                             putString("root_uri", rootUri.toString())
                             apply()
                         }
-                    
-                    // Set the folder in the ViewModel
-                    viewModel.setLocalFolder(rootUri)
-                    
+
+                    // Set the folder in the ViewModel - use the tree URI for SharedFolder
+                    viewModel.setLocalFolder(it)
+
                     Log.d("FolderSyncScreen", "Successfully persisted URI permissions for: $it")
                 } catch (e: SecurityException) {
                     Log.e("FolderSyncScreen", "Failed to persist URI permissions: ${e.message}")
@@ -198,10 +202,20 @@ fun FolderSyncScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = "Connection Status",
-                        style = MaterialTheme.typography.titleMedium
-                    )
+                    Column {
+                        Text(
+                            text = "Connection Status",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        if (viewModel.isConnected) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Role: ${if (viewModel.isGroupOwner) "Group Owner" else "Client"}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
@@ -210,9 +224,9 @@ fun FolderSyncScreen(
                             modifier = Modifier
                                 .size(8.dp)
                                 .background(
-                                    color = if (viewModel.isConnected) 
-                                        MaterialTheme.colorScheme.primary 
-                                    else 
+                                    color = if (viewModel.isConnected)
+                                        MaterialTheme.colorScheme.primary
+                                    else
                                         MaterialTheme.colorScheme.error,
                                     shape = CircleShape
                                 )
@@ -248,8 +262,8 @@ fun FolderSyncScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Button(
-                            onClick = { 
-                                folderPickerLauncher.launch(null) 
+                            onClick = {
+                                folderPickerLauncher.launch(null)
                             },
                             modifier = Modifier.weight(1f)
                         ) {
@@ -292,12 +306,44 @@ fun FolderSyncScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            "Remote Files",
-                            style = MaterialTheme.typography.titleMedium
-                        )
-                        IconButton(onClick = { viewModel.refreshRemoteFiles() }) {
-                            Text("🔄")
+                        Column {
+                            Text(
+                                "Remote Files",
+                                style = MaterialTheme.typography.titleMedium
+                            )
+                            if (viewModel.isConnected) {
+                                Text(
+                                    text = "Local: ${viewModel.localFileCount} files, Remote: ${viewModel.remoteFiles.size} files",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            IconButton(
+                                onClick = { viewModel.refreshFileLists() },
+                                enabled = !viewModel.isRefreshingFileLists
+                            ) {
+                                if (viewModel.isRefreshingFileLists) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(20.dp),
+                                        strokeWidth = 2.dp
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Default.Refresh,
+                                        contentDescription = "Refresh File Lists"
+                                    )
+                                }
+                            }
+                            Button(
+                                onClick = { viewModel.refreshRemoteFiles() },
+                                modifier = Modifier.height(40.dp)
+                            ) {
+                                Text("Refresh")
+                            }
                         }
                     }
 
@@ -321,10 +367,7 @@ fun FolderSyncScreen(
                             modifier = Modifier.padding(vertical = 8.dp)
                         )
                     } else {
-                        LazyColumn(
-                            modifier = Modifier.fillMaxSize(),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
+                        LazyColumn {
                             items(viewModel.remoteFiles) { fileName ->
                                 RemoteFileItem(
                                     fileName = fileName,

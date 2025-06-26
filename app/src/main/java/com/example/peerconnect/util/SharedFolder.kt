@@ -3,10 +3,12 @@ package com.example.peerconnect.util
 import android.content.Context
 import android.net.Uri
 import android.provider.DocumentsContract
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.InputStream
 import java.io.OutputStream
+import androidx.documentfile.provider.DocumentFile
 
 data class SharedFile(
     val name: String,
@@ -19,9 +21,17 @@ class SharedFolder(
     private val context: Context,
     internal val folderUri: Uri
 ) {
+    private val TAG = "SharedFolder"
+
     suspend fun listFiles(includeNested: Boolean = false): List<SharedFile> = withContext(Dispatchers.IO) {
         val files: MutableList<SharedFile> = mutableListOf()
-        listFilesRecursive(folderUri, files, includeNested)
+        try {
+            Log.d(TAG, "Listing files from folder: $folderUri")
+            listFilesRecursive(folderUri, files, includeNested)
+            Log.d(TAG, "Found ${files.size} files in folder")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error listing files: ${e.message}")
+        }
         files
     }
 
@@ -30,40 +40,29 @@ class SharedFolder(
         files: MutableList<SharedFile>,
         includeNested: Boolean
     ): Unit = withContext(Dispatchers.IO) {
-        val cursor: android.database.Cursor? = context.contentResolver.query(
-            uri,
-            arrayOf(
-                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-                DocumentsContract.Document.COLUMN_MIME_TYPE,
-                DocumentsContract.Document.COLUMN_SIZE
-            ),
-            null,
-            null,
-            null
-        )
-        
-        cursor?.use { safeCursor ->
-            val idColumn: Int = safeCursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
-            val nameColumn: Int = safeCursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
-            val mimeColumn: Int = safeCursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
-            val sizeColumn: Int = safeCursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_SIZE)
-
-            while (safeCursor.moveToNext()) {
-                val id: String = safeCursor.getString(idColumn)
-                val name: String = safeCursor.getString(nameColumn)
-                val mime: String = safeCursor.getString(mimeColumn)
-                val size: Long = safeCursor.getLong(sizeColumn)
-                val isDirectory: Boolean = mime == DocumentsContract.Document.MIME_TYPE_DIR
-
-                val childUri: Uri = DocumentsContract.buildChildDocumentsUriUsingTree(uri, id)
-                
-                if (isDirectory && includeNested) {
-                    listFilesRecursive(childUri, files, true)
-                } else if (!isDirectory) {
-                    files.add(SharedFile(name, childUri, isDirectory, size))
+        try {
+            val folder = DocumentFile.fromTreeUri(context, uri)
+            if (folder == null || !folder.isDirectory) {
+                Log.e(TAG, "Invalid folder DocumentFile for uri: $uri")
+                return@withContext
+            }
+            for (file in folder.listFiles()) {
+                if (file.isDirectory && includeNested) {
+                    listFilesRecursive(file.uri, files, true)
+                } else if (file.isFile) {
+                    files.add(
+                        SharedFile(
+                            name = file.name ?: "",
+                            uri = file.uri,
+                            isDirectory = false,
+                            size = file.length()
+                        )
+                    )
+                    Log.d(TAG, "Added file: ${file.name} with URI: ${file.uri}")
                 }
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in listFilesRecursive: ${e.message}")
         }
     }
 
