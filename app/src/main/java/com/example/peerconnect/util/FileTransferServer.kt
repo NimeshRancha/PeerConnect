@@ -12,15 +12,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
-import java.io.BufferedReader
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.IOException
-import java.io.InputStreamReader
-import java.io.PrintWriter
 import java.net.ServerSocket
 import java.net.Socket
 import androidx.documentfile.provider.DocumentFile
+import java.net.URLDecoder
+import java.net.URLEncoder
 
 class FileTransferServer(
     private val context: Context,
@@ -78,33 +77,35 @@ class FileTransferServer(
         scope.launch(Dispatchers.IO) {
             try {
                 Log.d(TAG, "Client connected from ${clientSocket.inetAddress.hostAddress}:${clientSocket.port}")
-                
-                val reader = BufferedReader(InputStreamReader(clientSocket.getInputStream()))
-                val writer = PrintWriter(clientSocket.getOutputStream(), true)
-                val command = reader.readLine()
-
-                when (command) {
-                    "GET_FILE_LIST" -> {
+                val input = DataInputStream(BufferedInputStream(clientSocket.getInputStream()))
+                val output = DataOutputStream(BufferedOutputStream(clientSocket.getOutputStream()))
+                val command = input.readUTF()
+                when {
+                    command == "GET_FILE_LIST" -> {
                         val fileList = sharedFolder.listFiles(includeNested = true).map { it.name }
                         val jsonList = gson.toJson(fileList)
-                        writer.println(jsonList)
+                        output.writeUTF(jsonList)
+                        output.flush()
                         Log.d(TAG, "Sent file list to client: $fileList")
                     }
-                    "READY_FOR_SERVER_TRANSFERS" -> {
+                    command == "READY_FOR_SERVER_TRANSFERS" -> {
                         transferReadyClients.add(clientSocket)
-                        writer.println("OK")
+                        output.writeUTF("OK")
+                        output.flush()
                         Log.d(TAG, "Client ${clientSocket.inetAddress.hostAddress} is ready for server transfers")
                     }
+                    command.startsWith("GET_FILE:") -> {
+                        val encodedName = command.substringAfter("GET_FILE:")
+                        val fileName = URLDecoder.decode(encodedName, "UTF-8")
+                        handleFileDownload(clientSocket, fileName, input, output)
+                    }
+                    command == "UPLOAD_FILE" -> {
+                        handleFileUpload(clientSocket, input, output, onFileReceived)
+                    }
                     else -> {
-                        if (command?.startsWith("GET_FILE:") == true) {
-                            val fileName = command.substringAfter("GET_FILE:")
-                            handleFileDownload(clientSocket, fileName)
-                        } else if (command?.startsWith("UPLOAD_FILE") == true) {
-                            handleFileUpload(clientSocket, onFileReceived)
-                        } else {
-                            Log.e(TAG, "Unknown command: $command")
-                            writer.println("ERROR: Unknown command")
-                        }
+                        Log.e(TAG, "Unknown command: $command")
+                        output.writeUTF("ERROR: Unknown command")
+                        output.flush()
                     }
                 }
             } catch (e: Exception) {
@@ -121,41 +122,31 @@ class FileTransferServer(
         }
     }
 
-    private suspend fun handleFileDownload(clientSocket: Socket, fileName: String) {
+    private suspend fun handleFileDownload(clientSocket: Socket, fileName: String, input: DataInputStream, output: DataOutputStream) {
         withContext(Dispatchers.IO) {
             try {
-                val writer = PrintWriter(clientSocket.getOutputStream(), true)
                 val file = sharedFolder.getFile(fileName)
-                
                 if (file == null) {
-                    writer.println("ERROR: File not found")
+                    output.writeUTF("ERROR: File not found")
+                    output.flush()
                     Log.e(TAG, "File not found: $fileName")
                     return@withContext
                 }
-
-                writer.println("OK")
-                writer.flush()
+                output.writeUTF("OK")
+                output.writeUTF(URLEncoder.encode(fileName, "UTF-8"))
+                output.writeLong(file.size)
+                output.flush()
                 Log.d(TAG, "Starting file download: $fileName")
-
-                val output = DataOutputStream(BufferedOutputStream(clientSocket.getOutputStream()))
-                val inputStream = sharedFolder.openInputStream(file.uri) ?: throw IOException("Failed to open file for reading")
-
+                val fileInputStream = sharedFolder.openInputStream(file.uri) ?: throw IOException("Failed to open file for reading")
+                var totalSent = 0L
                 try {
-                    output.writeUTF(fileName)
-                    output.writeLong(file.size)
-                    output.flush()
-
                     val buffer = ByteArray(8192)
                     var read: Int
-                    var totalSent = 0L
                     val startTime = System.currentTimeMillis()
                     var lastProgressUpdate = startTime
-
-                    while (inputStream.read(buffer).also { read = it } != -1) {
+                    while (fileInputStream.read(buffer).also { read = it } != -1) {
                         output.write(buffer, 0, read)
                         totalSent += read
-
-                        // Log progress every second
                         val currentTime = System.currentTimeMillis()
                         if (currentTime - lastProgressUpdate >= 1000) {
                             val progress = (totalSent * 100.0 / file.size).toInt()
@@ -164,11 +155,11 @@ class FileTransferServer(
                             lastProgressUpdate = currentTime
                         }
                     }
-
                     output.flush()
                     Log.d(TAG, "File download completed: $fileName")
+                    Log.d(TAG, "Total bytes sent for $fileName: $totalSent bytes")
                 } finally {
-                    inputStream.close()
+                    fileInputStream.close()
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error during file download: ${e.message}")
@@ -177,34 +168,27 @@ class FileTransferServer(
         }
     }
 
-    private suspend fun handleFileUpload(clientSocket: Socket, onFileReceived: (String) -> Unit) {
+    private suspend fun handleFileUpload(clientSocket: Socket, input: DataInputStream, output: DataOutputStream, onFileReceived: (String) -> Unit) {
         withContext(Dispatchers.IO) {
             try {
-                val input = DataInputStream(BufferedInputStream(clientSocket.getInputStream()))
-                val writer = PrintWriter(clientSocket.getOutputStream(), true)
-                
-                writer.println("READY")
-                
-                val fileName = input.readUTF()
+                output.writeUTF("READY")
+                output.flush()
+                val encodedName = input.readUTF()
+                val fileName = URLDecoder.decode(encodedName, "UTF-8")
                 val fileSize = input.readLong()
                 Log.d(TAG, "Receiving file: $fileName (size: $fileSize bytes)")
-
-                // Create a new file in the shared folder using the correct URI structure
                 val newFileUri = createFileInFolder(context, sharedFolder.folderUri, fileName)
                     ?: throw IOException("Failed to create destination file")
-
                 context.contentResolver.openOutputStream(newFileUri)?.use { outputStream ->
                     val buffer = ByteArray(8192)
                     var totalRead = 0L
                     var lastProgressUpdate = System.currentTimeMillis()
-
                     while (totalRead < fileSize) {
                         val remaining = fileSize - totalRead
                         val read = input.read(buffer, 0, minOf(buffer.size, remaining.toInt()))
                         if (read == -1) break
                         outputStream.write(buffer, 0, read)
                         totalRead += read
-
                         val now = System.currentTimeMillis()
                         if (now - lastProgressUpdate >= 1000) {
                             val progress = (totalRead * 100.0 / fileSize).toInt()
@@ -213,13 +197,15 @@ class FileTransferServer(
                         }
                     }
                     outputStream.flush()
-                    
                     if (totalRead == fileSize) {
-                        writer.println("SUCCESS")
+                        output.writeUTF("SUCCESS")
+                        output.flush()
                         Log.d(TAG, "File received successfully: $fileName")
+                        Log.d(TAG, "Total bytes received for $fileName: $totalRead bytes")
                         onFileReceived(fileName)
                     } else {
-                        writer.println("FAILED")
+                        output.writeUTF("FAILED")
+                        output.flush()
                         Log.e(TAG, "File transfer incomplete: $totalRead/$fileSize bytes")
                     }
                 }
@@ -257,8 +243,8 @@ class FileTransferServer(
 
                 for (client in clients) {
                     try {
-                        val writer = PrintWriter(client.getOutputStream(), true)
-                        writer.println("SERVER_FILE:$fileName")
+                        val writer = DataOutputStream(BufferedOutputStream(client.getOutputStream()))
+                        writer.writeUTF("SERVER_FILE:$fileName")
                         
                         val output = DataOutputStream(BufferedOutputStream(client.getOutputStream()))
                         val inputStream = sharedFolder.openInputStream(file.uri) ?: throw IOException("Failed to open file for reading")

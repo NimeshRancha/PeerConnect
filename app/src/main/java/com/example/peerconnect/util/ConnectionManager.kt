@@ -473,8 +473,8 @@ class ConnectionManager(
         private const val MAX_CONNECTION_RETRIES = 3
         
         // Keep-alive timings
-        private const val KEEP_ALIVE_INTERVAL = 10000L // Check every 10 seconds
-        private const val KEEP_ALIVE_CHECK_INTERVAL = 8000L // Minimum 8 seconds between checks
+        private const val KEEP_ALIVE_INTERVAL = 20000L // Check every 10 seconds
+        private const val KEEP_ALIVE_CHECK_INTERVAL = 15000L // Minimum 8 seconds between checks
         private const val MAX_CONSECUTIVE_FAILURES = 3
         
         // Disconnect and discovery timings

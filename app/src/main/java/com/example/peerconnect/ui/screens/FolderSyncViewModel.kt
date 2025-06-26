@@ -108,34 +108,6 @@ class FolderSyncViewModel(
         }
     }
 
-    private fun startConnectionMonitoring() {
-        connectionMonitorJob?.cancel()
-        connectionMonitorJob = viewModelScope.launch {
-            while (true) {
-                try {
-                    if (isConnected) {
-                        Log.d(TAG, "Checking connection status...")
-                        val files = fileTransferClient?.requestFileList()
-                        if (files == null) {
-                            Log.e(TAG, "Connection check failed - no files received")
-                            isConnected = false
-                            errorMessage = "Connection lost"
-                            break
-                        } else {
-                            Log.d(TAG, "Connection check successful - ${files.size} files available")
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Connection monitor error: ${e.message}")
-                    isConnected = false
-                    errorMessage = "Connection lost: ${e.message}"
-                    break
-                }
-                delay(5000) // Check every 5 seconds
-            }
-        }
-    }
-
     private fun createTempFolder(context: Context): Uri {
         val tempDir = context.getExternalFilesDir(null)
         val tempFolder = java.io.File(tempDir, "temp_shared_folder").apply {
@@ -229,7 +201,6 @@ class FolderSyncViewModel(
                     isConnected = true
                     errorMessage = null
                     Log.d(TAG, "Successfully connected to peer - ${files.size} files available")
-                    startConnectionMonitoring()
                     
                     // Start listening for server-initiated transfers
                     fileTransferClient?.startListening { fileName, uri ->
@@ -287,19 +258,15 @@ class FolderSyncViewModel(
                 val localFolder = sharedFolder ?: throw IllegalStateException("No local folder selected")
                 val client = fileTransferClient ?: throw IllegalStateException("No remote peer connected")
 
-                // Get local and remote files
                 val localFiles = localFolder.listFiles(includeNested = true)
                 val remoteFileList = client.requestFileList()
 
-                // Find files to download (files in remote but not in local)
                 val localFileNames = localFiles.map { it.name }.toSet()
                 val filesToDownload = remoteFileList.filter { it !in localFileNames }
 
-                // Find files to upload (files in local but not in remote)
                 val remoteFileNames = remoteFileList.toSet()
                 val filesToUpload = localFiles.filter { it.name !in remoteFileNames }
 
-                // Download missing files
                 filesToDownload.forEach { fileName ->
                     try {
                         downloadFile(fileName)
@@ -309,7 +276,6 @@ class FolderSyncViewModel(
                     }
                 }
 
-                // Upload missing files
                 filesToUpload.forEach { file ->
                     try {
                         uploadFile(file.uri)
@@ -320,12 +286,12 @@ class FolderSyncViewModel(
                 }
 
                 Log.d("FolderSyncViewModel", "Folder sync completed. Downloaded: ${filesToDownload.size}, Uploaded: ${filesToUpload.size}")
+                refreshRemoteFiles()
             } catch (e: Exception) {
                 Log.e("FolderSyncViewModel", "Folder sync failed: ${e.message}")
                 errorMessage = "Failed to sync folders: ${e.message}"
             } finally {
                 isLoading = false
-                refreshRemoteFiles()
             }
         }
     }
@@ -436,6 +402,7 @@ class FolderSyncViewModel(
         if (!success) {
             throw IllegalStateException("Failed to download file")
         }
+        refreshRemoteFiles()
     }
 
     fun uploadFile(uri: Uri) {
@@ -452,17 +419,15 @@ class FolderSyncViewModel(
 
                 val client = fileTransferClient ?: throw IllegalStateException("No remote peer connected")
                 Log.d(TAG, "Starting file upload to peer")
-                
-                // Use DocumentFile to get the file name
                 val documentFile = DocumentFile.fromSingleUri(context, uri)
                     ?: throw IllegalStateException("Failed to access file")
-                
                 val success = client.sendFile(uri)
                 if (!success) {
                     errorMessage = "Failed to upload file"
                     Log.e(TAG, "File upload failed")
                 } else {
                     Log.d(TAG, "File upload completed successfully")
+                    refreshRemoteFiles()
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Upload error: ${e.message}", e)
@@ -474,7 +439,6 @@ class FolderSyncViewModel(
     }
 
     fun disconnect() {
-        connectionMonitorJob?.cancel()
         serverStartRetryJob?.cancel()
         fileTransferServer?.stopServer()
         fileTransferClient?.cleanup()
@@ -488,7 +452,6 @@ class FolderSyncViewModel(
 
     override fun onCleared() {
         super.onCleared()
-        connectionMonitorJob?.cancel()
         serverStartRetryJob?.cancel()
         fileTransferServer?.stopServer()
         fileTransferClient?.cleanup()
