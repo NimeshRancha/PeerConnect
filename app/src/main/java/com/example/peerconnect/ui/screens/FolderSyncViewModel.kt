@@ -20,8 +20,6 @@ import com.example.peerconnect.util.SharedFolder
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.flow.launchIn
-import kotlinx.coroutines.flow.onEach
 import androidx.documentfile.provider.DocumentFile
 
 class FolderSyncViewModel(
@@ -62,7 +60,6 @@ class FolderSyncViewModel(
     private var fileTransferClient: FileTransferClient? = null
     private var fileTransferServer: FileTransferServer? = null
     private var isServerRunning = false
-    private var connectionMonitorJob: Job? = null
     private var serverStartRetryJob: Job? = null
 
     private val context: Context

@@ -21,9 +21,6 @@ fun PeerConnectNavGraph(
         composable("home") {
             HomeScreen(navController = navController)
         }
-        composable("details") {
-            DetailsScreen()
-        }
         composable("folderSync") {
             FolderSyncScreen(
                 connectionInfo = connectionInfo,
@@ -40,12 +37,6 @@ fun PeerConnectNavGraph(
                 manager = manager,
                 channel = channel
             )
-        }
-        composable("settings") {
-            SettingsScreen()
-        }
-        composable("transferLogs") {
-            TransferLogsScreen()
         }
     }
 }
